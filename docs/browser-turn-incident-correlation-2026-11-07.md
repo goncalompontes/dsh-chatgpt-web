@@ -90,5 +90,9 @@ occurred during independent page effort-control setup, before tool execution.
 activation sequence up to three times, clearing ghost picker state between
 attempts. The retry is bounded and does not replay a submitted prompt or tool
 call. The admission smoke accepts a configurable client count so the workload is
-reproducible (`--clients 8`). A subsequent rerun is required after deployment to
-measure whether the retry removes this load-sensitive failure.
+reproducible (`--clients 8`). After deployment, the repeated eight-client run had
+no effort-picker failures; seven clients completed and one exceeded the smoke
+client's 300-second end-to-end timeout after a 166-second admission wait and a
+later response-stall retry. The sidecar remained healthy, capped active turns at
+four, and drained all seven pending requests. This separates the fixed picker
+race from a remaining queue/client-timeout budget under heavier load.
