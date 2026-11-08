@@ -3,6 +3,7 @@ import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { loadConfig } from "./config";
 
 export interface CordisContext {
   on?: (event: string, listener: (...args: any[]) => any) => unknown;
@@ -108,6 +109,36 @@ export function apply(ctx: CordisContext, config: ChatGPTWebPluginConfig = {}): 
   const autoStart = config.autoStart !== false;
   const readyTimeoutMs = config.readyTimeoutMs || 30_000;
   const logger = typeof ctx.logger === "function" ? ctx.logger("chatgpt-web") : console;
+  const turns = new Map<string, number>();
+  const sidecarTurns = new Map<string, number>();
+
+  // Cancellation can happen between provider requests, after a tool was delivered.
+  // No HTTP stream exists then to carry an abort. Forward the producer's exact turn
+  // identity so a delayed interrupt cannot cancel the next turn or another session.
+  ctx.on?.("session/event", (session, event) => {
+    const sessionId = String(session.id);
+    if (event.type === "turn/start" && Number.isSafeInteger(event.data?.turn)) {
+      turns.set(sessionId, event.data.turn);
+    }
+    if (event.type !== "turn/end") return;
+    if (turns.get(sessionId) === event.data?.turn) turns.delete(sessionId);
+    const turn = sidecarTurns.get(sessionId);
+    if (turn === undefined || turn !== event.data?.turn) return;
+    sidecarTurns.delete(sessionId);
+    if (event.data?.reason?.kind !== "aborted") return;
+    return (async () => {
+      try {
+        const response = await fetch(`http://${host}:${port}/admin/interrupt-turn`, {
+          method: "POST", signal: AbortSignal.timeout(5_000),
+          headers: { "content-type": "application/json", Authorization: `Bearer ${loadConfig().controlToken}` },
+          body: JSON.stringify({ threadId: `dsh-${sessionId}`, turnId: `dsh-turn-${turn}` }),
+        });
+        if (!response.ok) throw new Error(`sidecar returned HTTP ${response.status}`);
+      } catch (error) {
+        logger.warn(`[dsh-chatgpt-web] Could not forward turn cancellation: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    })();
+  });
 
   // DSH exposes stable session identity and auxiliary purpose at its provider boundary.
   // Keep these out of model-visible text and avoid changing other providers' requests.
@@ -117,6 +148,12 @@ export function apply(ctx: CordisContext, config: ChatGPTWebPluginConfig = {}): 
     try { endpoint = new URL(request.baseURL); } catch { return result; }
     if (endpoint.hostname !== host || endpoint.port !== String(port)) return result;
     if (request.sessionId !== undefined) result.set("x-dsh-session-id", String(request.sessionId));
+    const sessionId = String(request.sessionId);
+    const turn = turns.get(sessionId);
+    if (turn !== undefined) {
+      result.set("x-dsh-turn-id", `dsh-turn-${turn}`);
+      sidecarTurns.set(sessionId, turn);
+    }
     if (request.purpose !== undefined) result.set("x-dsh-request-purpose", String(request.purpose));
     return result;
   });

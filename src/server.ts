@@ -526,10 +526,12 @@ export async function responseRequest(
     parsed = parseRequest(expanded);
     if (config.purpose === "dsh") {
       const sessionId = req.headers.get("x-dsh-session-id");
+      const turnId = req.headers.get("x-dsh-turn-id");
       const purpose = req.headers.get("x-dsh-request-purpose");
       if (sessionId && /^[A-Za-z0-9_.:-]{1,200}$/.test(sessionId)) {
         const body = parsed._rawBody as Record<string, unknown>;
-        parsed._rawBody = { ...body, _dshSessionId: sessionId };
+        parsed._rawBody = { ...body, _dshSessionId: sessionId,
+          ...(turnId && /^dsh-turn-[1-9]\d{0,14}$/.test(turnId) ? { _dshTurnId: turnId } : {}) };
       }
       if (purpose && /^[A-Za-z0-9_.:-]{1,100}$/.test(purpose)) parsed._dshRequestPurpose = purpose;
       // Some DSH hosts use the Responses compaction endpoint, which arrives with
@@ -1015,6 +1017,7 @@ export function startServer(
         accepting_turns: !draining,
         successful_model_catalog_requests: successfulModelCatalogRequests,
         last_successful_model_catalog_request_at: lastSuccessfulModelCatalogRequestAt,
+        browser_admission: chatGptTurnSessions.admissionMetrics(),
         ...activity(),
       });
     }

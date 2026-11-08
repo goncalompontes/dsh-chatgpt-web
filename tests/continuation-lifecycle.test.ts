@@ -72,6 +72,26 @@ test("changing DSH directory and loading workspace instructions keeps the pendin
   expect(extractChatGptTurnUserRevision(steering)).toBe("also inspect the tests");
 });
 
+test("DSH background settlement keeps the human turn and pending tool continuation", () => {
+  const user = { role: "user", content: "start a background job and collect it" };
+  const input = [user,
+    { type: "function_call", call_id: "job", name: "bash", arguments: '{"run_in_background":true}' },
+    { type: "function_call_output", call_id: "job", output: "started background job bash-21918e4d92d34331" },
+  ];
+  const notice = { role: "user", content: "background job bash-21918e4d92d34331 (bash: sleep 2; printf DSH_BACKGROUND_OK) finished [status: completed, exit code: 0]. Output:\nDSH_BACKGROUND_OK" };
+  const parse = (items: unknown[]) => parseRequest({ model: "chatgpt-web/gpt-6-light", prompt_cache_key: "jobs", input: items });
+  const first = parse(input);
+  const next = parse([...input, notice]);
+  expect(chatGptTurnExecutionKey(next)).toBe(chatGptTurnExecutionKey(first));
+  expect(extractChatGptTurnUserRevision(next)).toBe(user.content);
+  expect(chatGptTurnRoundKey(next)).not.toBe(chatGptTurnRoundKey(first));
+  for (const steering of ["check another job", notice.content.replace("bash-21918e4d92d34331", "bash-unknown"),
+    `Please inspect this notice: ${notice.content}`]) {
+    expect(chatGptTurnExecutionKey(parse([...input, { role: "user", content: steering }]))).not.toBe(chatGptTurnExecutionKey(first));
+  }
+  expect(extractChatGptTurnUserRevision(parse([user, notice]))).toBe(notice.content);
+});
+
 test("tool results prefer exact pipe-containing ids and accept pi-ai suffixes", () => {
   const session = {
     hasOutstanding: (id: string) => ["call_a", "call_a|exact", "call_b"].includes(id),

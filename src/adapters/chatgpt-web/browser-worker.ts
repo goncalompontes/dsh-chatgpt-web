@@ -22,6 +22,7 @@ import { parseDataUrl } from "../image";
 import {
   ChatGptMarkdownBuffer,
   ChatGptMarkdownConsistencyError,
+  chatGptHtmlToMarkdown,
   type ChatGptMarkdownSegment,
 } from "./markdown";
 import {
@@ -203,6 +204,7 @@ const CHATGPT_SMOKE_EXPECTED = "CODEX WEB GPT READY";
 export const CHATGPT_UI_SETTLE_MS = 250;
 
 const CHATGPT_DOM_REVISION_ATTRIBUTES = [
+  "alt",
   "aria-hidden",
   "aria-label",
   "aria-busy",
@@ -225,6 +227,8 @@ const CHATGPT_DOM_REVISION_ATTRIBUTES = [
   "open",
   "role",
   "start",
+  "src",
+  "srcset",
   "style",
 ] as const;
 
@@ -3312,14 +3316,21 @@ export class ChatGptBrowserWorker {
             const clone = bubble.cloneNode(true) as HTMLElement;
             clone.querySelectorAll('button, svg, script, style, [app-mention-name], [data-id^="plugin:"][data-keyword]')
               .forEach(node => node.remove());
+            // Composer newlines become block elements after hydration. textContent
+            // alone joins adjacent paragraphs and falsely changes the prompt identity.
+            clone.querySelectorAll("br").forEach(node => node.replaceWith("\n"));
+            clone.querySelectorAll("p, div, li, pre, blockquote").forEach(node => {
+              node.prepend("\n");
+              node.append("\n");
+            });
             return clone.textContent ?? "";
           }), signal,
         ));
         const normalized = normalize(actual);
         // The current renderer can leave the connector's textual mention outside its pill.
-        const mention = `$${this.config.appName} `;
+        const mentions = [`$${this.config.appName} `, `${this.config.appName} `];
         submittedPromptMatches = normalized === expected
-          || (normalized.startsWith(mention) && normalized.slice(mention.length) === expected);
+          || mentions.some(mention => normalized.startsWith(mention) && normalized.slice(mention.length) === expected);
       }
       if (!submittedPromptMatches) {
         throw new Error("ChatGPT opened another user turn while the bound assistant response was detached");
@@ -4283,7 +4294,9 @@ export class ChatGptBrowserWorker {
           // preserving those labels and links. Purely visual map surfaces stay excluded.
           return !candidate.querySelector("a[href], h2, h3, h4, [data-testid*='place'], [data-testid*='location']");
         }
-        if (candidate.tagName.toLowerCase() === "canvas") return true;
+        if (candidate.tagName.toLowerCase() === "canvas") {
+          return !candidate.getAttribute("aria-label") && !candidate.textContent?.trim();
+        }
         const text = candidate.textContent?.trim() || "";
         if (candidate.children.length === 0) {
           if (/Use two fingers to move the map|Hold Ctrl to zoom|Map data|Report a map error/i.test(text)) {
@@ -4422,7 +4435,7 @@ export class ChatGptBrowserWorker {
           const shell = document.createElement("span");
           nodes.forEach(node => shell.append(node.cloneNode(true)));
           const text = shell.textContent?.trim() ?? "";
-          if (text) {
+          if (text || shell.querySelector("img, picture, svg[aria-label], svg title, canvas[aria-label]")) {
             const rangedElements = nodes.flatMap(node => node instanceof Element
               ? [node, ...node.querySelectorAll<HTMLElement>("[data-start][data-end]")]
               : []);
@@ -4622,6 +4635,9 @@ export class ChatGptBrowserWorker {
       return absentResponseDomSnapshot();
     }
     const snapshot = observed.snapshot ?? cache?.snapshot ?? absentResponseDomSnapshot();
+    // A completed image/labelled graphic can have no innerText. Its semantic
+    // Markdown fallback still constitutes an answer for completion/health checks.
+    if (!snapshot.visibleText && snapshot.fullHtml) snapshot.visibleText = chatGptHtmlToMarkdown(snapshot.fullHtml);
     if (observed.snapshot && cache) {
       cache.key = observed.key;
       cache.snapshot = observed.snapshot;

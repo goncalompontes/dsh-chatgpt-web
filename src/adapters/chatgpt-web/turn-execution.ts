@@ -820,6 +820,10 @@ export class ChatGptTurnSessions {
     return active;
   }
 
+  admissionMetrics() {
+    return this.admission.metrics();
+  }
+
   private prune(): void {
     const cutoff = Date.now() - this.ttlMs;
     for (const [key, session] of this.entries) {

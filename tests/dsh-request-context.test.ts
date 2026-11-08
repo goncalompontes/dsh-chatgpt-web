@@ -13,7 +13,7 @@ test("DSH session/purpose headers identify a text-only compaction without the Co
   let captured: CodexParsedRequest | undefined;
   const request = new Request("http://127.0.0.1:17841/v1/responses", {
     method: "POST", headers: { "content-type": "application/json", "x-dsh-session-id": "dsh-test-session",
-      "x-dsh-request-purpose": "compaction" }, body: JSON.stringify({
+      "x-dsh-request-purpose": "compaction", "x-dsh-turn-id": "dsh-turn-9" }, body: JSON.stringify({
       model: "chatgpt-web/gpt-6-high", stream: false, input: [{ role: "user", content: "summarize the conversation" }],
       tools: [{ type: "function", name: "bash", parameters: { type: "object" } }],
     }),
@@ -29,6 +29,7 @@ test("DSH session/purpose headers identify a text-only compaction without the Co
   expect(captured!.context.tools).toBeUndefined();
   expect(captured!._compactionRequest).toBeUndefined();
   expect(extractChatGptTurnIdentity(captured!).threadId).toBe("dsh-dsh-test-session-compaction");
+  expect(extractChatGptTurnIdentity(captured!).turnId).toBe("dsh-turn-9");
   const data = await response.json() as any;
   expect(data.output.some((item: any) => item.type === "message")).toBe(true);
   expect(data.output.some((item: any) => item.type === "compaction")).toBe(false);

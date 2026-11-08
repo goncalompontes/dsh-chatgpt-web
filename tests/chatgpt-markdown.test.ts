@@ -51,6 +51,23 @@ test("image references remain in Markdown without embedding browser-only bytes",
     .not.toContain('base64');
 });
 
+test("responsive pictures and labelled vector/canvas content retain meaningful fallbacks", () => {
+  expect(chatGptHtmlToMarkdown('<picture><source srcset="https://example.org/large.webp"><img alt="Diagram" src="https://example.org/diagram.png"></picture>'))
+    .toBe('![Diagram](https://example.org/diagram.png)');
+  expect(chatGptHtmlToMarkdown('<svg role="img"><title>Sales trend</title><desc>Revenue increased</desc><path d="M0 0"></path></svg>'))
+    .toContain('[Graphic: Sales trend — Revenue increased (visual available in ChatGPT)]');
+  expect(chatGptHtmlToMarkdown('<p><canvas aria-label="Revenue chart"></canvas></p>'))
+    .toContain('[Canvas: Revenue chart (visual available in ChatGPT)]');
+  expect(chatGptHtmlToMarkdown('<svg aria-hidden="true"><title>Copy icon</title></svg><svg><path d="M0 0"></path></svg>'))
+    .toBe('');
+});
+
+test("KaTeX annotations preserve original math without duplicating visual and MathML layers", () => {
+  const math = '<span class="katex"><span class="katex-mathml"><math><semantics><mrow><mi>x</mi></mrow><annotation encoding="application/x-tex">x^2 + y^2</annotation></semantics></math></span><span class="katex-html" aria-hidden="true">duplicate visual math</span></span>';
+  expect(chatGptHtmlToMarkdown('<p>Formula: ' + math + '</p>')).toBe('Formula: $x^2 + y^2$');
+  expect(chatGptHtmlToMarkdown('<span class="katex-display">' + math + '</span>')).toBe('$$\nx^2 + y^2\n$$');
+});
+
 test("code wrappers without the modern source element fall back without crashing", () => {
   expect(chatGptHtmlToMarkdown('<div data-code-block="true"><pre><code class="language-text">ONE\nTWO</code></pre></div>'))
     .toBe("```text\nONE\nTWO\n```");

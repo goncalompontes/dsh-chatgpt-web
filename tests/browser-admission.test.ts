@@ -2,6 +2,53 @@ import { describe, expect, test } from "bun:test";
 import { ChatGptBrowserAdmission } from "../src/adapters/chatgpt-web/browser-admission";
 
 describe("bounded browser admission", () => {
+  test("a saturated 256-owner queue drains FIFO through cancellations and pressure reduction", async () => {
+    const admission = new ChatGptBrowserAdmission(5, 256);
+    const initial = await Promise.all(Array.from({ length: 5 }, () => admission.acquire()));
+    const order: number[] = [];
+    const controllers = Array.from({ length: 256 }, () => new AbortController());
+    const cancelled: number[] = [];
+    const pending = controllers.map((controller, index) => admission.acquire(controller.signal).then(release => {
+      order.push(index);
+      expect(admission.snapshot().active).toBeLessThanOrEqual(1);
+      release();
+    }, error => {
+      expect(error.name).toBe("AbortError");
+      cancelled.push(index);
+    }));
+    await expect(admission.acquire()).rejects.toThrow("queue is full");
+    admission.setCapacity(1);
+    controllers.forEach((controller, index) => { if (index % 8 === 0) controller.abort(); });
+    initial.slice(0, 4).forEach(release => release());
+    await Promise.resolve();
+    expect(order).toEqual([]);
+    initial[4]!();
+    await Promise.all(pending);
+    expect(order).toEqual(Array.from({ length: 256 }, (_, index) => index).filter(index => index % 8 !== 0));
+    expect(cancelled).toHaveLength(32);
+    expect(admission.metrics()).toMatchObject({ active: 0, pending: 0, admitted: 229, cancelled: 32, rejected: 1 });
+  });
+
+  test("queue metrics distinguish overload, cancellation and actual admission latency", async () => {
+    let now = 100;
+    const queue = new ChatGptBrowserAdmission(1, 2, () => now);
+    const first = await queue.acquire();
+    const cancelled = new AbortController();
+    const second = queue.acquire(cancelled.signal).catch(error => error.name);
+    const third = queue.acquire();
+    await expect(queue.acquire()).rejects.toThrow("queue is full");
+    now = 150;
+    expect(queue.metrics().oldestPendingMs).toBe(50);
+    cancelled.abort();
+    expect(await second).toBe("AbortError");
+    now = 200;
+    first();
+    const release = await third;
+    expect(queue.metrics()).toMatchObject({ active: 1, pending: 0, admitted: 2, cancelled: 1,
+      rejected: 1, totalQueueWaitMs: 100, maxQueueWaitMs: 100, oldestPendingMs: 0 });
+    release();
+  });
+
   test("admits FIFO without exceeding the physical limit", async () => {
     const queue = new ChatGptBrowserAdmission(2);
     const a = await queue.acquire();

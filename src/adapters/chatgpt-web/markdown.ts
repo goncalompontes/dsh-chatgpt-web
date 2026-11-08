@@ -11,6 +11,8 @@ const turndown = new TurndownService({
   emDelimiter: "*",
   strongDelimiter: "**",
   linkStyle: "inlined",
+  blankReplacement: (content, node) => visualFallback(node as HTMLElement)
+    ?? (content.trim() ? content : (node as HTMLElement & { isBlock?: boolean }).isBlock ? "\n\n" : ""),
 });
 
 turndown.use(gfm);
@@ -42,13 +44,14 @@ turndown.addRule("chatGptCodeBlock", {
     return `\n\n${fence}${language}\n${code}${code.endsWith("\n") ? "" : "\n"}${fence}\n\n`;
   },
 });
-turndown.remove(["button", "script", "style", "canvas", "noscript", "iframe"]);
+turndown.remove(["button", "script", "style", "noscript", "iframe"]);
 // Preserve image references when a browser-exposed, absolute HTTPS/HTTP URL is available.
 // Embedded data URLs and blob URLs are intentionally not copied into model text: the former
 // could inline megabytes and the latter are inaccessible outside the ephemeral browser page.
 turndown.addRule("chatGptImages", {
   filter: node => ["IMG", "PICTURE", "SOURCE"].includes(node.nodeName),
   replacement: (_content, node) => {
+    if (node.nodeName === "PICTURE") return _content;
     if (node.nodeName !== "IMG") return "";
     const image = node as HTMLElement;
     const source = image.getAttribute("src") ?? "";
@@ -60,9 +63,34 @@ turndown.addRule("chatGptImages", {
     return `![${alt}](${source.replaceAll("(", "%28").replaceAll(")", "%29")})`;
   },
 });
-turndown.addRule("removeSvg", {
-  filter: node => node.nodeName === "SVG",
-  replacement: () => "",
+function visualFallback(node: HTMLElement): string | undefined {
+  const kind = node.nodeName.toUpperCase();
+  if (!["SVG", "CANVAS"].includes(kind)) return undefined;
+  if (node.getAttribute("aria-hidden") === "true") return "";
+  const label = node.getAttribute("aria-label")
+    || node.querySelector("title")?.textContent
+    || (kind === "CANVAS" ? node.textContent : "");
+  if (!label?.trim()) return "";
+  const description = [label, node.querySelector("desc")?.textContent].filter(Boolean)
+    .join(" — ").replace(/\s+/g, " ").replace(/[\[\]]/g, "").trim().slice(0, 1000);
+  return `[${kind === "SVG" ? "Graphic" : "Canvas"}: ${description} (visual available in ChatGPT)]`;
+}
+
+turndown.addRule("visualFallback", {
+  filter: node => ["SVG", "CANVAS"].includes(node.nodeName.toUpperCase()),
+  replacement: (_content, node) => visualFallback(node as HTMLElement) ?? "",
+});
+turndown.addRule("chatGptMath", {
+  filter: node => node.nodeName.toUpperCase() === "MATH"
+    || /(?:^|\s)katex(?:-display)?(?:\s|$)/.test((node as HTMLElement).getAttribute?.("class") ?? ""),
+  replacement: (content, node) => {
+    const element = node as HTMLElement;
+    const tex = element.querySelector('annotation[encoding="application/x-tex"]')?.textContent?.trim();
+    if (!tex) return content;
+    const display = element.getAttribute("display") === "block"
+      || /(?:^|\s)katex-display(?:\s|$)/.test(element.getAttribute("class") ?? "");
+    return display ? `\n\n$$\n${tex}\n$$\n\n` : `$${tex}$`;
+  },
 });
 function readableWidgetSummary(element: HTMLElement): string {
   const noise = /^(?:use two fingers to move the map|hold ctrl to zoom|map data|report a map error|zoom in|zoom out|openstreetmap|mapbox|google maps|map)$/i;

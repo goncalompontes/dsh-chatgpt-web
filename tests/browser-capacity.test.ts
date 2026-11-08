@@ -17,7 +17,7 @@ describe("resource-aware browser capacity", () => {
   test("conservatively clamps under memory or CPU pressure", () => {
     expect(estimateBrowserCapacity(sample(4, 0, 64))).toBe(1);
     expect(estimateBrowserCapacity(sample(32, 12, 16))).toBe(1);
-    expect(estimateBrowserCapacity(sample(6, 0, 64))).toBe(2);
+    expect(estimateBrowserCapacity(sample(10, 0, 64))).toBe(2);
   });
 
   test("falls back safely on unavailable or invalid samples", () => {
@@ -29,7 +29,7 @@ describe("resource-aware browser capacity", () => {
 
   test("uses bounded measured turn RSS when provided", () => {
     expect(estimateBrowserCapacity({ ...sample(12, 0, 64), turnRssBytes: 3 * GiB })).toBe(2);
-    expect(estimateBrowserCapacity({ ...sample(12, 0, 64), turnRssBytes: Number.NaN })).toBe(5);
+    expect(estimateBrowserCapacity({ ...sample(12, 0, 64), turnRssBytes: Number.NaN })).toBe(2);
   });
 
   test("rejects unsafe capacity policy settings", () => {

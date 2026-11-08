@@ -20,7 +20,9 @@ export const DEFAULT_BROWSER_CAPACITY_LIMITS: BrowserCapacityLimits = {
   min: 1,
   max: 5, // Keep the current independently enforced browser-worker limit until validated.
   memoryReserveBytes: 4 * 1024 ** 3,
-  defaultTurnRssBytes: 768 * 1024 ** 2,
+  // Live ACP smoke: ~1.9 GiB for one active browser tree and ~2.5 GiB with
+  // retained conversations. Use a conservative allowance pending peak-load calibration.
+  defaultTurnRssBytes: 3 * 1024 ** 3,
   cpuHeadroomFraction: 0.75,
 };
 

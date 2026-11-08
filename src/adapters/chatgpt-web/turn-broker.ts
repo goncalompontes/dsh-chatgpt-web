@@ -69,6 +69,8 @@ interface TurnChannel {
   queuedCallIds: string[];
   deliveredCallIds: Set<string>;
   invocations: Map<string, PendingInvocation>;
+  /** Result digests survive lost acknowledgements until the turn is revoked. */
+  completionReceipts: Map<string, string>;
   waiters: Set<ToolWaiter>;
   compactionRequested: boolean;
   compactionResult?: BrokerToolResult;
@@ -141,6 +143,16 @@ interface BrokerResponse {
 const brokers = new Map<string, TurnBroker>();
 const MAX_BROKER_LINE_CHARS = 67_108_864;
 const MAX_RETIRED_TURN_HANDLES = 64;
+const MAX_TURN_TOOL_CALLS = 1024;
+
+function resultFingerprint(result: BrokerToolResult): string {
+  // Match wire-equivalent JSON independent of object insertion order. Store only a
+  // digest: image/base64 results must not accumulate in a second per-turn buffer.
+  const canonical = JSON.stringify(result, (_key, value) => value && typeof value === "object" && !Array.isArray(value)
+    ? Object.fromEntries(Object.keys(value).sort().map(key => [key, value[key]]))
+    : value);
+  return createHash("sha256").update(canonical).digest("hex");
+}
 
 export async function closeTurnBrokers(): Promise<void> {
   const active = [...brokers.values()];
@@ -299,6 +311,7 @@ export class TurnBroker implements TurnBrokerOwner {
       queuedCallIds: [],
       deliveredCallIds: new Set(),
       invocations: new Map(),
+      completionReceipts: new Map(),
       waiters: new Set(),
       compactionRequested: false,
       compactionDeliveryCount: 0,
@@ -425,12 +438,19 @@ export class TurnBroker implements TurnBrokerOwner {
     const channel = this.channels.get(token);
     if (!channel) throw new Error("turn token is invalid or expired");
     this.assertSafeHarnessRunning(channel, true);
+    const fingerprint = resultFingerprint(result);
+    const receipt = channel.completionReceipts.get(callId);
+    if (receipt !== undefined) {
+      if (receipt !== fingerprint) throw new Error(`tool call completion conflicts with its accepted result: ${callId}`);
+      return;
+    }
     const invocation = channel.invocations.get(callId);
     if (!invocation) throw new Error(`tool call is not pending: ${callId}`);
     if (!channel.deliveredCallIds.delete(callId)) {
       throw new Error(`tool call was completed before it was delivered: ${callId}`);
     }
     channel.invocations.delete(callId);
+    channel.completionReceipts.set(callId, fingerprint);
     console.info(`[chatgpt-web] broker trace=${channel.traceId} completed call=${callId.slice(0, 17)} pending=${channel.invocations.size}`);
     invocation.resolve(result);
   }
@@ -1116,6 +1136,11 @@ export class TurnBroker implements TurnBrokerOwner {
 
     const wireName = request.wireName?.trim();
     if (!wireName) throw new Error("wire tool name is required");
+    // Never evict a receipt while its owner can retry. Bound new work instead,
+    // reserving space for every already-admitted invocation's eventual result.
+    if (binding.channel.invocations.size + binding.channel.completionReceipts.size >= MAX_TURN_TOOL_CALLS) {
+      throw new Error(`turn tool-call limit reached (${MAX_TURN_TOOL_CALLS}); start a new turn`);
+    }
     const callId = opaqueId("call");
     const toolRequest: BrokerToolRequest = {
       callId,
@@ -1217,7 +1242,9 @@ export class TurnBroker implements TurnBrokerOwner {
  * a caller that cannot compute a deadline must not silently inherit an unbounded wait. An
  * unbounded call still ends when the turn is revoked or the broker drops the connection.
  */
-export class TurnBrokerTimeoutError extends Error {
+export class TurnBrokerTransportError extends Error {}
+
+export class TurnBrokerTimeoutError extends TurnBrokerTransportError {
   constructor() {
     super("ChatGPT web turn broker timed out");
     this.name = "TurnBrokerTimeoutError";
@@ -1256,7 +1283,7 @@ export async function callTurnBroker<T>(
     const finishResponse = () => {
       if (settled) return;
       if (!response) {
-        finishError(new Error("ChatGPT web turn broker closed the connection"));
+        finishError(new TurnBrokerTransportError("ChatGPT web turn broker closed the connection"));
         return;
       }
       settled = true;
@@ -1274,7 +1301,7 @@ export async function callTurnBroker<T>(
       return;
     }
     socket.setEncoding("utf8");
-    socket.once("error", error => finishError(new Error(`ChatGPT web turn broker unavailable: ${error.message}`)));
+    socket.once("error", error => finishError(new TurnBrokerTransportError(`ChatGPT web turn broker unavailable: ${error.message}`)));
     // The server owns response termination. Waiting for the pipe/socket to close before resolving
     // prevents callers from retiring the broker while Bun still has a named-pipe write in flight.
     socket.once("close", finishResponse);
@@ -1408,12 +1435,18 @@ export class RemoteTurnBroker implements TurnBrokerOwner {
   }
 
   async completeTool(token: string, callId: string, result: BrokerToolResult): Promise<void> {
-    await callTurnBroker(this.socketPath, {
-      method: "owner_complete",
-      token,
-      callId,
-      toolResult: result,
-    }, null);
+    // Retry delivery of this result only, never the original tool invocation.
+    // The broker's receipt makes an accepted-but-unacknowledged result idempotent.
+    for (let attempt = 0; ; attempt++) {
+      try {
+        await callTurnBroker(this.socketPath, {
+          method: "owner_complete", token, callId, toolResult: result,
+        });
+        return;
+      } catch (error) {
+        if (!(error instanceof TurnBrokerTransportError) || attempt >= 2) throw error;
+      }
+    }
   }
 
   async waitForSafeStart(token: string, signal?: AbortSignal): Promise<void> {

@@ -106,13 +106,32 @@ export function hasRawChatGptEnvironmentContext(parsed: CodexParsedRequest): boo
   });
 }
 
-function contextualUserMessage(value: Record<string, unknown>, dsh = false): boolean {
+/** pi-ai drops inbox provenance. Only recognize the pinned job notice envelope when a
+ * preceding tool result proves this conversation started that exact job. */
+function dshJobNotices(input: unknown[]): Set<unknown> {
+  const jobs = new Set<string>();
+  const notices = new Set<unknown>();
+  for (const value of input) {
+    const item = record(value);
+    if (!item) continue;
+    if (item.type === "function_call_output" && typeof item.output === "string") {
+      const started = /^started background job ([A-Za-z0-9_-]+)$/.exec(item.output.trim());
+      if (started) jobs.add(started[1]!);
+    }
+    if (item.role !== "user") continue;
+    const notice = /^background job ([A-Za-z0-9_-]+) \([^\n]+\) finished \[status: (?:completed|failed|killed|cancelled)(?:, [^\]\n]+)?\]\. (?:Output:\n[\s\S]*|No new output\.|Read its output with job_output\.)$/.exec(rawMessageText(item).trim());
+    if (notice && jobs.has(notice[1]!)) notices.add(value);
+  }
+  return notices;
+}
+
+function contextualUserMessage(value: Record<string, unknown>, dsh = false, jobNotices?: Set<unknown>): boolean {
   const text = rawMessageText(value).trim();
   // pi-ai projects these DSH producer messages into user-role text. They update context,
   // not the human revision owning a pending tool call. This never grants filesystem authority.
   return /^<environment_context>[\s\S]*<\/environment_context>$/.test(text)
     || /^<subagent_notification>[\s\S]*<\/subagent_notification>$/.test(text)
-    || (dsh && (text.startsWith("Current runtime context. This snapshot supersedes earlier runtime-context snapshots.")
+    || (dsh && (jobNotices?.has(value) || text.startsWith("Current runtime context. This snapshot supersedes earlier runtime-context snapshots.")
       || /^<system-reminder>\s*A skill is a reusable set[\s\S]*<available_skills>/.test(text)
       || /^<system-reminder>\s*The following workspace instructions may be relevant to your work\./.test(text)
       || /^<system-reminder>\s*Additional instructions from: [^\n]+\n/.test(text)
@@ -169,6 +188,7 @@ function latestChatGptTurnUserRevision(parsed: CodexParsedRequest, expectedTurnI
   const body = record(parsed._rawBody);
   const dsh = !extractCodexTurnIdentityFromBody(body).turnId;
   const input = Array.isArray(body?.input) ? body.input : [];
+  const jobNotices = dsh ? dshJobNotices(input) : undefined;
   for (let index = input.length - 1; index >= 0; index -= 1) {
     const item = record(input[index]);
     if (!item) continue;
@@ -182,7 +202,7 @@ function latestChatGptTurnUserRevision(parsed: CodexParsedRequest, expectedTurnI
       && expectedTurnId !== undefined
       && messageTurnId !== undefined
       && messageTurnId !== expectedTurnId) continue;
-    if (contextualUserMessage(item, dsh)) continue;
+    if (contextualUserMessage(item, dsh, jobNotices)) continue;
     return { content: item.content, ...(messageTurnId ? { turnId: messageTurnId } : {}) };
   }
   for (let index = parsed.context.messages.length - 1; index >= 0; index -= 1) {
@@ -626,10 +646,11 @@ export function extractChatGptTurnIdentity(parsed: CodexParsedRequest): ChatGptT
   if (!base.turnId) {
     const input = body?.input;
     const items = Array.isArray(input) ? input : [];
+    const jobNotices = dshJobNotices(items);
     let userIndex = -1;
     for (let i = items.length - 1; i >= 0; i--) {
       const item = record(items[i]);
-      if (item?.role === "user" && (item.type === "message" || !item.type) && !contextualUserMessage(item, true)) {
+      if (item?.role === "user" && (item.type === "message" || !item.type) && !contextualUserMessage(item, true, jobNotices)) {
         userIndex = i;
         break;
       }
@@ -641,7 +662,7 @@ export function extractChatGptTurnIdentity(parsed: CodexParsedRequest): ChatGptT
     // Repeating the same instruction later in a session must open a new turn as well.
     const occurrence = items.slice(0, userIndex + 1).filter(value => {
       const item = record(value);
-      return item?.role === "user" && !contextualUserMessage(item, true)
+      return item?.role === "user" && !contextualUserMessage(item, true, jobNotices)
         && JSON.stringify(item.content) === JSON.stringify(identityInput);
     }).length;
     const contentHash = createHash("sha256")
@@ -654,7 +675,7 @@ export function extractChatGptTurnIdentity(parsed: CodexParsedRequest): ChatGptT
       threadId: base.threadId ?? (typeof body?._dshSessionId === "string"
         ? `dsh-${body._dshSessionId}${parsed._dshRequestPurpose ? `-${parsed._dshRequestPurpose}` : ""}`
         : cacheKey) ?? "dsh-session",
-      turnId: `${turnPrefix}-${contentHash}`,
+      turnId: typeof body?._dshTurnId === "string" ? body._dshTurnId : `${turnPrefix}-${contentHash}`,
       ...(base.parentThreadId ? { parentThreadId: base.parentThreadId } : {}),
       ...(base.agentName ? { agentName: base.agentName } : {}),
       ...(base.subagentKind ? { subagentKind: base.subagentKind } : {}),

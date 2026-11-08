@@ -26,6 +26,27 @@ function mockRuntime() {
 const microtasks = async () => { await Promise.resolve(); await Promise.resolve(); await Promise.resolve(); };
 
 describe("native session admission", () => {
+  test("an exact DSH interrupt frees its pending owner without cancelling another turn", async () => {
+    const sessions = new ChatGptTurnSessions();
+    const first = mockRuntime();
+    const other = mockRuntime();
+    await sessions.getOrCreateAfterOwnerRetirement("first", "dsh-session-a", () => first.runtime,
+      undefined, undefined, "dsh-turn-1", "dsh-session-a");
+    const otherSession = await sessions.getOrCreateAfterOwnerRetirement("other", "dsh-session-b", () => other.runtime,
+      undefined, undefined, "dsh-turn-1", "dsh-session-b");
+    const cancelled = sessions.cancelNativeTurn("dsh-session-a", "dsh-turn-1", new Error("DSH interrupted"));
+    expect(cancelled.cancelled).toBe(1);
+    await cancelled.settlement;
+    const next = mockRuntime();
+    const replacement = await sessions.getOrCreateAfterOwnerRetirement("replacement", "dsh-session-a", () => next.runtime,
+      undefined, undefined, "dsh-turn-2", "dsh-session-a");
+    expect(sessions.cancelNativeTurn("dsh-session-a", "dsh-turn-1", new Error("delayed interrupt")).cancelled).toBe(0);
+    expect(otherSession.isPhysicallySettled()).toBe(false);
+    expect(replacement.isPhysicallySettled()).toBe(false);
+    next.runtime.cancel();
+    other.runtime.cancel();
+  });
+
   test("queues a sixth owner without creating a browser until physical settlement", async () => {
     const sessions = new ChatGptTurnSessions();
     const runtimes: ReturnType<typeof mockRuntime>[] = [];

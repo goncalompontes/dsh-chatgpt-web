@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import { runInNewContext } from "node:vm";
 import { patchDshAcpBundle } from "../scripts/patch-dsh-acp-tool-presentation.mjs";
 
-const INSTALLED_ACP = "/home/pontes/.local/opt/deepseek-harness/node_modules/@deepseek-ai/dsh-acp/lib/index.js";
+const ACP_FIXTURE = new URL("./fixtures/dsh-acp-presentation.cjs", import.meta.url);
 
 function extractFunction(source: string, name: string): string {
   const functionStart = source.indexOf(`function ${name}(`);
@@ -23,7 +23,7 @@ function extractFunction(source: string, name: string): string {
 
 describe("DSH ACP tool presentation compatibility", () => {
   test("patch is a non-destructive, idempotent source transformation", () => {
-    const original = readFileSync(INSTALLED_ACP, "utf8");
+    const original = readFileSync(ACP_FIXTURE, "utf8");
     const changed = patchDshAcpBundle(original);
     expect(changed.changed).toBe(true);
     expect(original).not.toContain("dsh-acp-tool-presentation-compat-v1");
@@ -35,7 +35,7 @@ describe("DSH ACP tool presentation compatibility", () => {
   });
 
   test("tool start maps named tools to truthful ACP kinds", () => {
-    const patched = patchDshAcpBundle(readFileSync(INSTALLED_ACP, "utf8")).source;
+    const patched = patchDshAcpBundle(readFileSync(ACP_FIXTURE, "utf8")).source;
     const evaluate = runInNewContext(
       `${extractFunction(patched, "acpToolKind")}\n${extractFunction(patched, "toolCallUpdate")}\ntoolCallUpdate`,
       { parseToolArguments: JSON.parse },
@@ -49,7 +49,7 @@ describe("DSH ACP tool presentation compatibility", () => {
   });
 
   test("terminal updates preserve call identity, name and kind", async () => {
-    const patched = patchDshAcpBundle(readFileSync(INSTALLED_ACP, "utf8")).source;
+    const patched = patchDshAcpBundle(readFileSync(ACP_FIXTURE, "utf8")).source;
     const evaluate = runInNewContext(
       `${extractFunction(patched, "acpToolKind")}\n${extractFunction(patched, "toolResultUpdate")}\ntoolResultUpdate`,
       { assistantBlockToAcp: async (_ctx: unknown, block: unknown) => block },

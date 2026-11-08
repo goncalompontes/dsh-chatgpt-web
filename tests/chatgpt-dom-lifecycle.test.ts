@@ -6,6 +6,26 @@ import { ChatGptBrowserWorker, chatGptTurnLocator, throwIfChatGptSubmissionError
 const executablePath = process.env.CHROME_EXECUTABLE_PATH ?? "/usr/bin/google-chrome-stable";
 const browserTest = existsSync(executablePath) ? test : test.skip;
 
+browserTest("image-only and labelled canvas answers survive DOM extraction and completion checks", async () => {
+  const browser = await chromium.launch({ executablePath, headless: true });
+  try {
+    const context = await browser.newContext();
+    await context.addInitScript("globalThis.__name = value => value");
+    const page = await context.newPage();
+    const worker: any = Object.create(ChatGptBrowserWorker.prototype);
+    await page.setContent('<main><section id="turn"><div class="markdown"><picture><img alt="Diagram" src="https://example.org/diagram.png"></picture></div></section><button data-testid="copy-turn-action-button">Copy</button></main>');
+    const image = await worker.responseDomSnapshot(page.locator("#turn"), {});
+    expect(image.visibleText).toContain('![Diagram](https://example.org/diagram.png)');
+    expect(image.completionActionVisible).toBe(true);
+    await page.setContent('<main><section id="turn"><div class="markdown"><p>Result</p><canvas aria-label="Revenue chart"></canvas><picture><img alt="Diagram" src="https://example.org/diagram.png"></picture></div></section></main>');
+    const mixed = await worker.responseDomSnapshot(page.locator("#turn"), {});
+    expect(mixed.markdownSegments.map((s: any) => s.html).join("")).toContain('Revenue chart');
+    expect(mixed.markdownSegments.map((s: any) => s.html).join("")).toContain('diagram.png');
+  } finally {
+    await browser.close();
+  }
+});
+
 browserTest("submission alerts outside a detached assistant preserve overflow and upstream failure reasons", async () => {
   const browser = await chromium.launch({ executablePath, headless: true });
   try {
@@ -116,6 +136,11 @@ browserTest("assistant rebinding proves a late user node belongs to the submitte
     expect(rebound.acceptedUserTurnIdentities).toEqual(["fallback-turn-0:0:user"]);
     expect(await rebound.locator.count()).toBe(1);
     expect(await rebound.locator.innerText({ timeout: 1000 })).toBe("Final answer");
+
+    // The hydrated user bubble renders composer newlines as separate paragraphs,
+    // and some builds expose the connector's plain label instead of a tagged pill.
+    await render('<main><div data-content-search-unit-key="fallback-turn-0:0:user"><div data-user-message-bubble><span>local-shell-dsh</span><p>Execute task</p><p>with its exact context</p><button>Show more</button></div></div><div data-content-search-unit-key="fallback-turn-0:2:assistant">Final answer</div></main>');
+    expect((await worker.reconcileAssistantTurnBinding(page, baseline, original)).identity).toBe("fallback-turn-0:2:assistant");
 
     // A genuinely different message must not be accepted as late hydration.
     await render('<main><div data-content-search-unit-key="fallback-turn-0:0:user">Different task</div><div data-content-search-unit-key="fallback-turn-0:2:assistant">Wrong answer</div></main>');

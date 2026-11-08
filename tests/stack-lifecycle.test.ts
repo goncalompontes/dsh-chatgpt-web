@@ -1,8 +1,56 @@
-import { test, expect } from "bun:test";
+import { test, expect, spyOn } from "bun:test";
 import { mkdtempSync, writeFileSync, readFileSync, existsSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { apply } from "../src/plugin";
+import { defaultConfig } from "../src/config";
+
+test("DSH explicit cancellation forwards only the exact turn sent to this sidecar", async () => {
+  const root = mkdtempSync(join(tmpdir(), "dsh-cancel-plugin-"));
+  const previous = process.env.DSH_CHATGPT_WEB_HOME;
+  const previousFree = process.env.DSH_CHATGPT_FREE_HOME;
+  process.env.DSH_CHATGPT_WEB_HOME = root;
+  delete process.env.DSH_CHATGPT_FREE_HOME;
+  const config = defaultConfig();
+  writeFileSync(join(root, "config.json"), JSON.stringify(config));
+  const calls: Array<{ url: string; body: any }> = [];
+  const fetchSpy = spyOn(globalThis, "fetch").mockImplementation(async (url: any, options: any) => {
+    expect(options.headers.Authorization).toBe(`Bearer ${config.controlToken}`);
+    calls.push({ url: String(url), body: JSON.parse(options.body) });
+    return Response.json({ status: "ok" });
+  });
+  try {
+    const hooks = new Map<string, (...args: any[]) => any>();
+    apply({ on: (name, callback) => hooks.set(name, callback), effect: () => {} }, { autoStart: false });
+    const event = hooks.get("session/event")!;
+    const headers = hooks.get("llm-pi-ai/request-headers")!;
+    const start = (id: string, turn: number) => event({ id }, { type: "turn/start", data: { turn } });
+    const end = (id: string, turn: number, kind = "aborted") => event({ id }, { type: "turn/end", data: { turn, reason: { kind } } });
+    const request = (id: string, baseURL = "http://127.0.0.1:17841/v1") => {
+      const result = new Headers();
+      return headers({ sessionId: id, baseURL }, result, () => result);
+    };
+    start("session-a", 1);
+    expect(request("session-a").get("x-dsh-turn-id")).toBe("dsh-turn-1");
+    await end("session-a", 1);
+    expect(calls).toEqual([{ url: "http://127.0.0.1:17841/admin/interrupt-turn",
+      body: { threadId: "dsh-session-a", turnId: "dsh-turn-1" } }]);
+    start("session-a", 2);
+    request("session-a");
+    await end("session-a", 1); // delayed old event cannot cancel the replacement
+    start("other-provider", 1);
+    request("other-provider", "https://api.example.com/v1");
+    await end("other-provider", 1);
+    await end("session-a", 2, "completed");
+    expect(calls).toHaveLength(1);
+  } finally {
+    fetchSpy.mockRestore();
+    if (previous === undefined) delete process.env.DSH_CHATGPT_WEB_HOME;
+    else process.env.DSH_CHATGPT_WEB_HOME = previous;
+    if (previousFree !== undefined) process.env.DSH_CHATGPT_FREE_HOME = previousFree;
+    rmSync(root, { recursive: true, force: true });
+  }
+});
 
 test("native DSH header hook carries stable session and compaction purpose only to this sidecar", () => {
   let hook: ((...args: any[]) => Headers) | undefined;
