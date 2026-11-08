@@ -3,7 +3,7 @@
  *
  * T3 Code currently falls back to "Tool" when a terminal ACP tool_call_update
  * omits title. DSH sends it at start, but previously dropped it at completion.
- * The patch keeps per-session presentation metadata and repeats name/title/kind.
+ * The patch repeats title/kind/arguments so terminal cards retain their tool identity.
  *
  * No installation is modified unless --apply is supplied explicitly.
  */
@@ -11,7 +11,11 @@ import { readFileSync, writeFileSync, renameSync, existsSync } from "node:fs";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-const PATCH_MARKER = "dsh-acp-tool-presentation-compat-v1";
+const PATCH_MARKER = "dsh-acp-tool-presentation-compat-v3";
+const V2_MARKER = "dsh-acp-tool-presentation-compat-v2";
+const LEGACY_MARKER = "dsh-acp-tool-presentation-compat-v1";
+const LEGACY_READ_KIND = '  if (/^(?:read|read_image|glob|working_directory|terminal_read|terminal_list|job_output|job_list)$/.test(name)) return "read";';
+const READ_KIND = '  if (/^(?:read|read_image)$/.test(name)) return "read";';
 
 function replaceOnce(source, oldText, newText) {
   const first = source.indexOf(oldText);
@@ -23,12 +27,23 @@ function replaceOnce(source, oldText, newText) {
 
 export function patchDshAcpBundle(original) {
   if (original.includes(PATCH_MARKER)) return { source: original, changed: false };
+  if (original.includes(LEGACY_MARKER) || original.includes(V2_MARKER)) {
+    let source = original;
+    if (source.includes(LEGACY_MARKER)) {
+      source = replaceOnce(replaceOnce(source, LEGACY_MARKER, V2_MARKER), LEGACY_READ_KIND, READ_KIND);
+      source = replaceOnce(source, '(?:grep|web_search|mcp_tool_search)$', '(?:glob|grep|web_search|mcp_tool_search)$');
+    }
+    source = replaceOnce(source, V2_MARKER, PATCH_MARKER);
+    source = replaceOnce(source, '{ name: event.data.name });', '{ name: event.data.name, rawInput: parseToolArguments(event.data.arguments) });');
+    source = replaceOnce(source, 'title: presentation.name, kind: acpToolKind(presentation.name) }', 'title: presentation.name, kind: acpToolKind(presentation.name), rawInput: presentation.rawInput }');
+    return { source, changed: true };
+  }
   let source = original;
   source = replaceOnce(source, "function toolCallUpdate(event) {", `/* ${PATCH_MARKER} */
 function acpToolKind(name) {
   if (/^(?:bash|pwsh|exec|exec_command|run_shell|terminal_send|run_code)$/.test(name)) return "execute";
-  if (/^(?:read|read_image|glob|working_directory|terminal_read|terminal_list|job_output|job_list)$/.test(name)) return "read";
-  if (/^(?:grep|web_search|mcp_tool_search)$/.test(name)) return "search";
+${READ_KIND}
+  if (/^(?:glob|grep|web_search|mcp_tool_search)$/.test(name)) return "search";
   if (/^(?:web_fetch)$/.test(name)) return "fetch";
   if (/^(?:write|edit|apply_patch|str_replace_editor)$/.test(name)) return "edit";
   if (/^(?:delete|remove|unlink)$/.test(name)) return "delete";
@@ -39,11 +54,11 @@ function toolCallUpdate(event) {`);
   source = replaceOnce(source, "async function toolResultUpdate(ctx, event) {", "async function toolResultUpdate(ctx, event, presentation) {");
   source = replaceOnce(source,
     '\t\ttoolCallId: message.toolCallId,\n\t\tstatus: message.isError === true ? "failed" : "completed",\n\t\tcontent',
-    '\t\ttoolCallId: message.toolCallId,\n\t\t...(presentation ? { title: presentation.name, kind: acpToolKind(presentation.name) } : {}),\n\t\tstatus: message.isError === true ? "failed" : "completed",\n\t\tcontent');
+    '\t\ttoolCallId: message.toolCallId,\n\t\t...(presentation ? { title: presentation.name, kind: acpToolKind(presentation.name), rawInput: presentation.rawInput } : {}),\n\t\tstatus: message.isError === true ? "failed" : "completed",\n\t\tcontent');
   source = replaceOnce(source, '\toutputTail = Promise.resolve();\n\tinflight;', '\toutputTail = Promise.resolve();\n\ttoolPresentation = new Map();\n\tinflight;');
   source = replaceOnce(source,
     '\t\t\t} else if (event.type === "tool/call") {\n\t\t\t\tconst previous = this.outputTail;',
-    '\t\t\t} else if (event.type === "tool/call") {\n\t\t\t\tthis.toolPresentation.set(event.data.callId, { name: event.data.name });\n\t\t\t\tconst previous = this.outputTail;');
+    '\t\t\t} else if (event.type === "tool/call") {\n\t\t\t\tthis.toolPresentation.set(event.data.callId, { name: event.data.name, rawInput: parseToolArguments(event.data.arguments) });\n\t\t\t\tconst previous = this.outputTail;');
   source = replaceOnce(source,
     '\t\t\t\tthis.outputTail = previous.then(async () => this.notify({\n\t\t\t\t\tsessionId: this.agent.session.id,\n\t\t\t\t\tupdate: await toolResultUpdate(this.ctx, event)\n\t\t\t\t})).catch((error) => {',
     '\t\t\t\tthis.outputTail = previous.then(async () => {\n\t\t\t\t\tconst callId = event.data.message.toolCallId;\n\t\t\t\t\ttry {\n\t\t\t\t\t\tawait this.notify({\n\t\t\t\t\t\t\tsessionId: this.agent.session.id,\n\t\t\t\t\t\t\tupdate: await toolResultUpdate(this.ctx, event, this.toolPresentation.get(callId))\n\t\t\t\t\t\t});\n\t\t\t\t\t} finally {\n\t\t\t\t\t\tthis.toolPresentation.delete(callId);\n\t\t\t\t\t}\n\t\t\t\t}).catch((error) => {');
@@ -65,7 +80,7 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
     if (!changed) console.log("DSH ACP presentation patch already present");
     else if (!apply) console.log(`Compatible bundle found; --apply would patch ${absolute}`);
     else {
-      const backup = absolute + ".before-t3-presentation-patch";
+      const backup = absolute + ".before-t3-presentation-v3-patch";
       if (existsSync(backup)) throw new Error(`Backup already exists: ${backup}`);
       writeFileSync(backup, existing, { flag: "wx" });
       const temporary = absolute + ".presentation-patch-temp";

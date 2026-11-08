@@ -1,6 +1,9 @@
 # T3/ACP tool presentation, rich response conversion, and concurrency
 
 Source investigation: 2026-11-07. This is a development handoff, not a claim of complete end-to-end feature delivery. Existing uncommitted changes are preserved.
+Later implementation/deployment status supersedes the historical pending notes below:
+see `acp-live-validation-2026-11-08.md` and `acp-consumer-validation-2026-11-08.md`.
+The compatibility patch is now installed and live-tested; queued admission is deployed.
 
 ## 1. Why T3 shows generic tool cards
 

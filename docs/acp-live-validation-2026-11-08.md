@@ -1,6 +1,8 @@
 # Live ACP, compaction, load and media validation
 
 Follow-up to `acp-reliability-goal-2026-11-08.md`. The overall reliability goal remains active.
+See `acp-consumer-validation-2026-11-08.md` for later installed T3 consumer probes,
+the v3 ACP presentation correction, a real PNG export, and native concurrency limits.
 
 ## Native compaction and transport recovery
 

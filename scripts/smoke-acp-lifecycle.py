@@ -10,6 +10,7 @@ import tempfile
 
 async def main(args):
     updates = []
+    captured = tempfile.NamedTemporaryFile(prefix="dsh-acp-updates-", suffix=".jsonl", mode="w", delete=False) if args.capture_updates else None
     sequence = 0
     session = None
     cancel_on_tool = False
@@ -56,6 +57,9 @@ async def main(args):
                 if message.get("method") == "session/update":
                     update = message["params"]["update"]
                     updates.append(update)
+                    if captured:
+                        captured.write(json.dumps(update) + "\n")
+                        captured.flush()
                     if cancel_on_tool and update.get("sessionUpdate") == "tool_call":
                         cancel_on_tool = False
                         await send({"jsonrpc": "2.0", "method": "session/cancel", "params": {"sessionId": session}})
@@ -70,13 +74,14 @@ async def main(args):
             "sessionId": session, "prompt": [{"type": "text", "text": text}],
         })
         turn = updates[start:]
-        completed = [u for u in turn if u.get("sessionUpdate") == "tool_call_update" and u.get("status") == "completed"]
+        terminal = [u for u in turn if u.get("sessionUpdate") == "tool_call_update" and u.get("status") in ("completed", "failed")]
+        completed = [u for u in terminal if u["status"] == "completed"]
         started = {u["toolCallId"]: u for u in turn if u.get("sessionUpdate") == "tool_call"}
         answer = "".join(u.get("content", {}).get("text", "") for u in turn if u.get("sessionUpdate") == "agent_message_chunk")
         assert result.get("stopReason") == "end_turn", result
         assert marker in answer.replace("\\_", "_"), answer
         assert required <= {u.get("title") for u in completed}, completed
-        for update in completed:
+        for update in terminal:
             original = started[update["toolCallId"]]
             assert update.get("title") == original["title"], update
             assert update.get("kind") == original["kind"], update
@@ -112,12 +117,13 @@ async def main(args):
             )
         elif args.scenario == "parallel":
             start = len(updates)
-            await prompt(
+            started = await prompt(
                 "Read-only parallel tool smoke check. In one parallel batch, make two independent read tool calls: "
                 "read README.md lines 1-3 and package.json lines 1-3. "
                 "After both finish reply DSH_PARALLEL_OK only. Do not change files or use other tools.",
                 "DSH_PARALLEL_OK", {"read"},
             )
+            assert len(started) == 2, started
             in_flight = set()
             peak = 0
             for update in updates[start:]:
@@ -126,7 +132,19 @@ async def main(args):
                     peak = max(peak, len(in_flight))
                 elif update.get("sessionUpdate") == "tool_call_update" and update.get("status") in ("completed", "failed"):
                     in_flight.discard(update["toolCallId"])
-            assert peak >= 2, "Model did not issue overlapping tool calls"
+            assert peak >= 2, "No overlapping native tool calls observed; inspect captured updates and broker batches"
+            print(json.dumps({"parallelPeak": peak}), flush=True)
+        elif args.scenario == "mixed-failure":
+            start = len(updates)
+            started = await prompt(
+                f"Read-only failure check. Use read once on the nonexistent file __dsh_smoke_missing_{session}. "
+                "Then use bash once to run `printf DSH_MIXED_OK`. The missing-file error is expected; "
+                "do not retry or create the file. After confirming bash's output reply DSH_MIXED_OK only. "
+                "Do not change files or use other tools.", "DSH_MIXED_OK", {"bash"},
+            )
+            assert sorted(call["title"] for call in started.values()) == ["bash", "read"], started
+            failed = [u for u in updates[start:] if u.get("sessionUpdate") == "tool_call_update" and u.get("status") == "failed"]
+            assert len(failed) == 1 and failed[0]["title"] == "read", failed
         elif args.scenario == "background":
             started = await prompt(
                 "This is a read-only lifecycle smoke check. Use bash to run `sleep 2; printf DSH_BACKGROUND_OK` "
@@ -256,6 +274,9 @@ async def main(args):
             if evidence.exists():
                 shutil.copyfile(evidence, Path(log.name + ".events.jsonl"))
             observer_dir.cleanup()
+        if captured:
+            captured.close()
+            print(json.dumps({"capturedUpdates": captured.name}), flush=True)
 
 
 if __name__ == "__main__":
@@ -263,6 +284,7 @@ if __name__ == "__main__":
     parser.add_argument("--dsh", default=shutil.which("dsh") or str(Path.home() / ".local/bin/dsh"))
     parser.add_argument("--cwd", default=str(Path.cwd()))
     parser.add_argument("--model", default="chatgpt-web/gpt-6-light")
-    parser.add_argument("--scenario", choices=("tool", "load", "background", "resume", "reconnect", "cancel", "parallel", "compact", "compact-active", "native-failure"), default="tool")
+    parser.add_argument("--scenario", choices=("tool", "load", "background", "resume", "reconnect", "cancel", "parallel", "mixed-failure", "compact", "compact-active", "native-failure"), default="tool")
     parser.add_argument("--timeout", type=float, default=180)
+    parser.add_argument("--capture-updates", action="store_true", help="Retain private ACP update JSONL for consumer compatibility probes")
     asyncio.run(main(parser.parse_args()))
