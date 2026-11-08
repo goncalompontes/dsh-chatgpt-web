@@ -1,7 +1,25 @@
 # Installed T3 consumer and media follow-up
 
 This extends `acp-live-validation-2026-11-08.md`. The overall reliability goal
-remains active; direct rendered T3 UI confirmation remains unverified.
+remains active; direct rendered T3 UI confirmation now passes for file reads.
+
+## Rendered T3 file cards
+
+The user-authorized temporary test thread
+<t3-thread://v2/22dc85a4-1f2f-48de-93f3-f1f80482d218/mcp:launch:f64d31a65a703baaa8f70cb20971f6f00a352767b7bbf52fa1afe027f0840f86>
+completed at `2026-11-08T12:55:51.394Z` using
+`acpRegistry_deepseek_harness` and `chatgpt-web/gpt-6-light`. Its activity contains
+exactly two completed native reads: lines 1–3 of README.md and package.json,
+followed by `DSH_T3_CARDS_OK`. The reference thread remained read-only.
+
+In the actual T3 browser UI, expanding “Worked for 37s” and then “Read 2 files”
+rendered “Read dsh-chatgpt-web/README.md” and
+“Read dsh-chatgpt-web/package.json”. Both the screenshot and page text confirmed
+these labels. Screenshot:
+`/home/pontes/.t3/userdata/browser-artifacts/browser-screenshot-127-0-0-1-mw7u7gin-0e6f4cd5.png`.
+The owned verification tab was closed afterward; the temporary thread remains as
+evidence. This establishes rendered file-card presentation; native probes below
+cover the other tool kinds.
 
 ## Actual T3 consumer behavior
 

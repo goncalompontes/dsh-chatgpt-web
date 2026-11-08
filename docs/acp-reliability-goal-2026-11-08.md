@@ -112,7 +112,8 @@ The existing gateway, router and T3 service need no code changes for this batch.
 
 ## Still required for the full goal
 
-- Verify the ACP presentation in the T3 UI, in addition to native protocol evidence.
+- Rendered T3 file-card verification passed in the user-authorized temporary
+  thread; see `acp-consumer-validation-2026-11-08.md` for the exact labels and screenshot.
 - Authenticated generated-image live export and fuller interactive-widget handling.
   Actual generated CSV bytes now pass the live check; Chromium image fixtures pass.
 - Broader resource workloads beyond queued tool round trips. Eight-client queued
