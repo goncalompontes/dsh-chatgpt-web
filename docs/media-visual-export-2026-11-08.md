@@ -23,3 +23,13 @@ Typecheck and build pass. Live native image generation remains restricted by
 Temporary Chat; prior live chart downloads prove file export rather than the
 authenticated inline-image fetch path. This follow-up does not claim a live
 canvas/SVG emission from ChatGPT or direct rendered T3 UI verification.
+
+Deployment acknowledged drain/shutdown at zero active HTTP/browser turns with
+no supervisor clients. The old process was subsequently confirmed absent; the
+replacement sidecar PID is 2419045. CLI SHA-256 is
+`b89242ccc4b067a3dc172141e77f0d443f8d67c93f2ce67f9933129fe7de4363`.
+The clean-tarball smoke passed. Fresh ACP session
+`75ca2282-d3a5-4d88-a828-ed8336bb5fdd` completed its bash call and final marker.
+Live chart session `media-smoke-19794b77-4152-4765-8a95-b713a231d240`
+exported a 4,269-byte PNG through the existing download path. Final health
+reported zero active turns and no pending admissions.

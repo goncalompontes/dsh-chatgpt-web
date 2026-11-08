@@ -5,6 +5,12 @@ This follows `t3-turn-errors-2026-11-08.md` and the referenced investigation at
 The goal remains active. The fixes below do not establish that every remaining issue is resolved.
 See `acp-live-validation-2026-11-08.md` for subsequent native checkpoint, transport-loss,
 six-client load and real downloaded-file evidence, plus the active-turn compaction fix.
+Later evidence is in `acp-consumer-validation-2026-11-08.md`,
+`dsh-parallel-batch-2026-11-08.md`, the eight-client follow-up in
+`browser-turn-incident-correlation-2026-11-07.md`, and
+`media-visual-export-2026-11-08.md`. These supersede the historical validation
+limits below: live batched reads now overlap, eight queued clients pass with
+independent connector transports, and labelled canvas/SVG visuals export as PNGs.
 
 ## Implemented
 
@@ -109,11 +115,9 @@ The existing gateway, router and T3 service need no code changes for this batch.
 - Verify the ACP presentation in the T3 UI, in addition to native protocol evidence.
 - Authenticated generated-image live export and fuller interactive-widget handling.
   Actual generated CSV bytes now pass the live check; Chromium image fixtures pass.
-- A live parallel dispatch with observed overlapping tools. Mixed failure ordering passes
-  the socket regression; reconnect after complete transport loss now passes natively.
-- Extend checkpoint coverage beyond the successful active-turn and idle native checks.
-  The follow-up document records the reproduced deadlock, model replay, and verified fixes.
-- Broader load workloads beyond the successful six-client queued tool round trip.
+- Broader resource workloads beyond queued tool round trips. Eight-client queued
+  admission now passes, including adaptive capacity and cross-client transport isolation;
+  large-document and image-generation peak memory remain outside that measurement.
 
 Do not restart workers while any real ACP session is active. Use health counters,
 supervisor leases, and targeted drain/shutdown; ordinary idle worker shutdown is expected.
