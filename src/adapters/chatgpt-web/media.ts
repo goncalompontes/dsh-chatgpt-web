@@ -103,9 +103,15 @@ export async function captureChatGptMedia(reply: Locator, directory: string, sig
       return /^sandbox:\/mnt\/data\//.test(url) || (anchor.hasAttribute("download") && /^blob:https:\/\/chatgpt\.com\//.test(url))
         || downloadButton ? [{ kind: "file", url: url || `download-button:${index}`, name: label || "Download", index }] : [];
     });
+    const graphics = [...root.querySelectorAll('canvas,svg')].flatMap((element, index) => {
+      const rect = element.getBoundingClientRect();
+      const name = element.getAttribute('aria-label') || element.querySelector('title')?.textContent?.trim();
+      return name && element.getAttribute('aria-hidden') !== 'true' && rect.width >= 64 && rect.height >= 64
+        ? [{ kind: 'graphic', url: `graphic:${index}`, name, index }] : [];
+    });
     const seen = new Set<string>();
-    return [...files, ...images].filter(asset => !seen.has(asset.url) && Boolean(seen.add(asset.url))).slice(0, limit);
-  }, MAX_ASSETS);
+    return [...files, ...images, ...graphics].filter(asset => !seen.has(asset.url) && Boolean(seen.add(asset.url))).slice(0, limit);
+  }, MAX_ASSETS + 1);
   if (!assets.length) {
     const controls = await reply.locator('a,button,[role="button"],[role="link"],[data-testid]').evaluateAll(nodes => nodes
       .filter(node => /download[^\n]{0,120}\.[a-z0-9]{1,8}/i.test(node.textContent ?? ""))
@@ -114,14 +120,17 @@ export async function captureChatGptMedia(reply: Locator, directory: string, sig
     if (controls.length) console.info(`[chatgpt-web] media_unrecognized_controls ${JSON.stringify(controls)}`);
   }
   const links: string[] = [];
-  for (const asset of assets) {
+  for (const asset of assets.slice(0, MAX_ASSETS)) {
     signal?.throwIfAborted();
     if (Date.now() > deadline) {
       links.push("Additional attachments are available in ChatGPT.");
       break;
     }
-    if (asset.kind === "image" && !exportableChatGptImageUrl(asset.url)) continue;
     const label = asset.name.replace(/[\[\]<>\\\r\n]/g, " ").slice(0, 160).trim() || "Attachment";
+    if (asset.kind === "image" && !exportableChatGptImageUrl(asset.url)) {
+      links.push(`${label}: export unavailable; open the attachment in ChatGPT.`);
+      continue;
+    }
     let phase = "image_fetch";
     let downloadProtocol: string | undefined;
     try {
@@ -132,6 +141,16 @@ export async function captureChatGptMedia(reply: Locator, directory: string, sig
         const extension = chatGptImageExtension(bytes);
         if (!extension) throw new Error("unsupported image encoding");
         filename = `image.${extension}`;
+      } else if (asset.kind === 'graphic') {
+        phase = 'graphic_capture';
+        const graphic = reply.locator('canvas,svg').nth(asset.index);
+        const bounds = await graphic.boundingBox();
+        if (!bounds || bounds.width > 4096 || bounds.height > 4096) throw new Error('graphic oversized');
+        // Capture the displayed pixels, including canvas content that cannot be
+        // represented by Markdown. Keep semantic descriptions in the prose too.
+        bytes = await graphic.screenshot({ type: 'png', scale: 'css', timeout: 5_000 });
+        if (bytes.length > MAX_ASSET_BYTES) throw new Error('graphic oversized');
+        filename = 'visual.png';
       } else {
         const page = reply.page();
         phase = "download_click";
@@ -171,12 +190,15 @@ export async function captureChatGptMedia(reply: Locator, directory: string, sig
       phase = "save";
       const path = await save(directory, filename, bytes);
       if (signal?.aborted) { await rm(path, { force: true }); signal.throwIfAborted(); }
-      links.push(`${asset.kind === "image" ? "!" : ""}[${label}](<${path}>)`);
+      links.push(`${asset.kind === "file" ? "" : "!"}[${label}](<${path}>)`);
     } catch (error) {
       if (signal?.aborted) throw error;
       console.info(`[chatgpt-web] media_export_failed ${JSON.stringify({ kind: asset.kind, phase, downloadProtocol })}`);
       links.push(`${label}: export unavailable; open the attachment in ChatGPT.`);
     }
+  }
+  if (assets.length > MAX_ASSETS && !links.includes("Additional attachments are available in ChatGPT.")) {
+    links.push("Additional attachments are available in ChatGPT.");
   }
   return links.length ? `\n\n${links.join("\n\n")}` : "";
 }

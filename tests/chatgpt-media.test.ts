@@ -95,3 +95,52 @@ browserTest("oversized or disguised image responses produce an explicit fallback
     await expect(captureChatGptMedia(page.locator("#reply"), directory, abort.signal)).rejects.toMatchObject({ name: "AbortError" });
   } finally { await browser.close(); rmSync(directory, { recursive: true, force: true }); }
 });
+
+browserTest("media export explains untrusted images and attachments beyond the export cap", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "dsh-media-limit-"));
+  const browser = await chromium.launch({ executablePath, headless: true });
+  try {
+    const page = await browser.newPage();
+    await page.setContent('<article id="reply">' + Array.from({ length: 9 }, (_, index) =>
+      `<img width="128" height="128" alt="External image ${index}" src="https://example.invalid/${index}.png">`).join('') + '</article>');
+    const appendix = await captureChatGptMedia(page.locator('#reply'), directory);
+    expect(appendix).toContain('External image 0: export unavailable');
+    expect(appendix).toContain('Additional attachments are available in ChatGPT.');
+    expect(readdirSync(directory)).toEqual([]);
+  } finally { await browser.close(); rmSync(directory, { recursive: true, force: true }); }
+});
+
+browserTest("exports labelled canvas and SVG visuals from the bound response as real PNGs", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "dsh-media-visual-"));
+  const browser = await chromium.launch({ executablePath, headless: true });
+  try {
+    const page = await browser.newPage();
+    await page.setContent(`<article id="reply"><canvas aria-label="Blue chart" width="128" height="128"></canvas>
+      <svg width="128" height="128"><title>Red diagram</title><rect width="128" height="128" fill="red"/></svg>
+      <svg width="16" height="16" aria-label="Icon"></svg></article>
+      <canvas width="128" height="128" aria-label="Unrelated"></canvas>`);
+    await page.locator('#reply canvas').evaluate(node => {
+      const canvas = node as HTMLCanvasElement;
+      const context = canvas.getContext('2d')!;
+      context.fillStyle = 'blue';
+      context.fillRect(0, 0, 128, 128);
+    });
+    const expected = await Promise.all(['#reply canvas', '#reply svg'].map(selector =>
+      page.locator(selector).first().screenshot({ type: 'png', scale: 'css' })));
+    const appendix = await captureChatGptMedia(page.locator('#reply'), directory);
+    expect(appendix).toContain('![Blue chart](<');
+    expect(appendix).toContain('![Red diagram](<');
+    expect(appendix).not.toContain('Unrelated');
+    expect(appendix).not.toContain('Icon');
+    const files = readdirSync(directory);
+    expect(files).toHaveLength(2);
+    const exported = files.map(file => readFileSync(join(directory, file)));
+    for (const pixels of expected) expect(exported.some(bytes => bytes.equals(pixels))).toBe(true);
+    for (const file of files) {
+      const bytes = readFileSync(join(directory, file));
+      expect(chatGptImageExtension(bytes)).toBe('png');
+      expect(bytes.readUInt32BE(16)).toBe(128);
+      expect(bytes.readUInt32BE(20)).toBe(128);
+    }
+  } finally { await browser.close(); rmSync(directory, { recursive: true, force: true }); }
+});
