@@ -97,6 +97,7 @@ export const CHATGPT_WEB_AGENT_WAIT_POLL_MS = 10_000;
 // must settle first so an abandoned native tool call is returned as an MCP error instead of
 // letting the tunnel tear down and poison its long-lived stdio transport.
 export const CHATGPT_WEB_MCP_INVOCATION_TIMEOUT_MS = 90_000;
+export const CHATGPT_WEB_EXTERNAL_MCP_INVOCATION_TIMEOUT_MS = 10 * 60_000;
 
 const ZERO_RISK_MCP_INSTRUCTIONS = [
   "For each pasted Codex Web GPT request, begin with codex_turn_start using the request_id in its request block.",
@@ -263,10 +264,12 @@ export function chatGptMcpInvocationTimeout(
   environment: ChatGptTurnEnvironment & { expiresAt?: number },
   now = Date.now(),
 ): number {
+  const budget = environment.mcpTransport === "external"
+    ? CHATGPT_WEB_EXTERNAL_MCP_INVOCATION_TIMEOUT_MS : CHATGPT_WEB_MCP_INVOCATION_TIMEOUT_MS;
   const remaining = environment.expiresAt === undefined
-    ? CHATGPT_WEB_MCP_INVOCATION_TIMEOUT_MS
+    ? budget
     : Math.max(1, environment.expiresAt - now);
-  return Math.min(CHATGPT_WEB_MCP_INVOCATION_TIMEOUT_MS, remaining);
+  return Math.min(budget, remaining);
 }
 
 function asMcpResult(value: BrokerToolResult) {

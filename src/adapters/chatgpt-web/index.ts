@@ -1004,6 +1004,7 @@ export function createChatGptWebAdapter(
         if (mode.localTools) {
           try {
             environment = environmentStore.resolve(parsed);
+            if (externalMcp && !manualRequest) environment = { ...environment, mcpTransport: "external" };
           } catch (error) {
             const identity = extractChatGptTurnIdentity(parsed);
             console.warn(

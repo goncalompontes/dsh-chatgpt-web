@@ -12,6 +12,8 @@ export type ChatGptSandboxPolicy =
   | { type: "workspaceWrite"; writableRoots: string[]; networkAccess: boolean };
 
 export interface ChatGptTurnEnvironment {
+  /** Set by the provider transport configuration, never by model tool arguments. */
+  mcpTransport?: "external";
   cwd: string;
   roots: string[];
   writableRoots: string[];
@@ -106,23 +108,58 @@ export function hasRawChatGptEnvironmentContext(parsed: CodexParsedRequest): boo
   });
 }
 
-/** pi-ai drops inbox provenance. Only recognize the pinned job notice envelope when a
- * preceding tool result proves this conversation started that exact job. */
-function dshJobNotices(input: unknown[]): Set<unknown> {
+/** pi-ai drops inbox provenance. Recognize pinned producer envelopes only when
+ * preceding tool calls/results support their claimed job or repetition. */
+function dshProducerNotices(input: unknown[]): Set<unknown> {
   const jobs = new Set<string>();
   const notices = new Set<unknown>();
+  const calls: { id: string; name: unknown; arguments: unknown; signature: string }[] = [];
+  const completed = new Set<string>();
   for (const value of input) {
     const item = record(value);
     if (!item) continue;
+    if (item.type === "function_call" && typeof item.call_id === "string") {
+      let args = item.arguments;
+      if (typeof args === "string") {
+        try { args = JSON.parse(args); } catch { /* DSH preserves malformed argument strings. */ }
+      }
+      calls.push({ id: item.call_id, name: item.name, arguments: args,
+        signature: canonicalDshArguments([item.name, args]) });
+    }
     if (item.type === "function_call_output" && typeof item.output === "string") {
+      if (typeof item.call_id === "string") completed.add(item.call_id);
       const started = /^started background job ([A-Za-z0-9_-]+)$/.exec(item.output.trim());
       if (started) jobs.add(started[1]!);
     }
     if (item.role !== "user") continue;
     const notice = /^background job ([A-Za-z0-9_-]+) \([^\n]+\) finished \[status: (?:completed|failed|killed|cancelled)(?:, [^\]\n]+)?\]\. (?:Output:\n[\s\S]*|No new output\.|Read its output with job_output\.)$/.exec(rawMessageText(item).trim());
     if (notice && jobs.has(notice[1]!)) notices.add(value);
+    // DSH injects this after three identical tool calls, including legitimate job polls.
+    // pi-ai drops its producer metadata; require the exact envelope and supporting calls.
+    if (rawMessageText(item).trim() === "You are repeating the exact same tool call with identical arguments. Carefully analyze the previous result before calling again: if the task is not complete, try a different approach or different arguments instead of repeating the call.") {
+      const recent = calls.slice(-3);
+      if (recent.length === 3 && new Set(recent.map(call => call.id)).size === 3
+        && recent.every(call => completed.has(call.id) && call.signature === recent[0]!.signature)) notices.add(value);
+    }
+    const detailed = /^Repeated tool call detected:\n- tool: ([^\n]+)\n- consecutive_calls: ([1-9]\d*)\n- arguments: ([^\n]+)\nThe repeated calls are not making progress\. Do not call this tool with these exact arguments again\. Inspect the latest result and choose a different action, different arguments, or finish the task if enough evidence has been gathered\.$/.exec(rawMessageText(item).trim());
+    if (detailed) {
+      const count = Number(detailed[2]);
+      const recent = calls.slice(-count);
+      if (count >= 3 && count <= calls.length && new Set(recent.map(call => call.id)).size === count
+        && recent.every(call => completed.has(call.id) && call.name === detailed[1]
+          && call.signature === recent[0]!.signature)
+        && canonicalDshArguments(recent[0]!.arguments) === detailed[3]) notices.add(value);
+    }
   }
   return notices;
+}
+
+function canonicalDshArguments(value: unknown): string {
+  const sort = (item: unknown): unknown => Array.isArray(item) ? item.map(sort)
+    : item !== null && typeof item === "object"
+    ? Object.fromEntries(Object.entries(item).sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0)
+      .map(([key, child]) => [key, sort(child)])) : item;
+  return JSON.stringify(sort(value));
 }
 
 function contextualUserMessage(value: Record<string, unknown>, dsh = false, jobNotices?: Set<unknown>): boolean {
@@ -188,7 +225,7 @@ function latestChatGptTurnUserRevision(parsed: CodexParsedRequest, expectedTurnI
   const body = record(parsed._rawBody);
   const dsh = !extractCodexTurnIdentityFromBody(body).turnId;
   const input = Array.isArray(body?.input) ? body.input : [];
-  const jobNotices = dsh ? dshJobNotices(input) : undefined;
+  const jobNotices = dsh ? dshProducerNotices(input) : undefined;
   for (let index = input.length - 1; index >= 0; index -= 1) {
     const item = record(input[index]);
     if (!item) continue;
@@ -646,7 +683,7 @@ export function extractChatGptTurnIdentity(parsed: CodexParsedRequest): ChatGptT
   if (!base.turnId) {
     const input = body?.input;
     const items = Array.isArray(input) ? input : [];
-    const jobNotices = dshJobNotices(items);
+    const jobNotices = dshProducerNotices(items);
     let userIndex = -1;
     for (let i = items.length - 1; i >= 0; i--) {
       const item = record(items[i]);

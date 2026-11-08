@@ -92,6 +92,37 @@ test("DSH background settlement keeps the human turn and pending tool continuati
   expect(extractChatGptTurnUserRevision(parse([user, notice]))).toBe(notice.content);
 });
 
+test("DSH repeated job polls keep their execution when the harness injects a reminder", () => {
+  const user = { role: "user", content: "collect the long-running job" };
+  const reminder = { role: "user", content: "You are repeating the exact same tool call with identical arguments. Carefully analyze the previous result before calling again: if the task is not complete, try a different approach or different arguments instead of repeating the call." };
+  const polls = Array.from({ length: 3 }, (_, i) => [
+    { type: "function_call", call_id: `poll-${i}`, name: "job_output", arguments: '{"job_id":"job-1","wait":true,"timeout_ms":30000}' },
+    { type: "function_call_output", call_id: `poll-${i}`, output: "(no new output)\n[status: running]" },
+  ]).flat();
+  const parse = (input: unknown[]) => parseRequest({ model: "chatgpt-web/gpt-6-light", prompt_cache_key: "long-polls", input });
+  const first = parse([user, ...polls]);
+  const next = parse([user, ...polls, reminder]);
+  expect(chatGptTurnExecutionKey(next)).toBe(chatGptTurnExecutionKey(first));
+  expect(extractChatGptTurnUserRevision(next)).toBe(user.content);
+  expect(chatGptTurnRoundKey(next)).not.toBe(chatGptTurnRoundKey(first));
+  for (const input of [[user, reminder], [user, ...polls.slice(0, 4), reminder],
+    [user, ...polls, { ...reminder, content: `Please explain: ${reminder.content}` }]]) {
+    expect(chatGptTurnExecutionKey(parse(input))).not.toBe(chatGptTurnExecutionKey(first));
+  }
+  // An unrelated latest call or three copies of one call do not prove the producer envelope.
+  expect(extractChatGptTurnUserRevision(parse([user, ...polls,
+    { ...polls[0], call_id: "other", name: "read" }, reminder]))).toBe(reminder.content);
+  expect(extractChatGptTurnUserRevision(parse([user, ...Array(3).fill(polls.slice(0, 2)).flat(), reminder]))).toBe(reminder.content);
+  const fivePolls = [...polls, ...polls.slice(0, 4).map(call => ({ ...call, call_id: `extra-${call.call_id}` }))];
+  const detail = { role: "user", content: 'Repeated tool call detected:\n- tool: job_output\n- consecutive_calls: 5\n- arguments: {"job_id":"job-1","timeout_ms":30000,"wait":true}\nThe repeated calls are not making progress. Do not call this tool with these exact arguments again. Inspect the latest result and choose a different action, different arguments, or finish the task if enough evidence has been gathered.' };
+  expect(chatGptTurnExecutionKey(parse([user, ...fivePolls, reminder, detail]))).toBe(chatGptTurnExecutionKey(first));
+  for (const content of [detail.content.replace('job-1', 'job-2'),
+    detail.content.replace('consecutive_calls: 5', 'consecutive_calls: 8'),
+    detail.content.replace('tool: job_output', 'tool: read')]) {
+    expect(extractChatGptTurnUserRevision(parse([user, ...fivePolls, { ...detail, content }]))).toBe(content);
+  }
+});
+
 test("tool results prefer exact pipe-containing ids and accept pi-ai suffixes", () => {
   const session = {
     hasOutstanding: (id: string) => ["call_a", "call_a|exact", "call_b"].includes(id),

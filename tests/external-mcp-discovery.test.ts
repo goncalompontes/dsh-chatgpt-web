@@ -18,6 +18,7 @@ test("external MCP carries the current profile's native schema and a DSH-only re
   expect(inventory).toEqual([{ wire_name: "read", description: "Read a DSH file", kind: "function", parameters }]);
   expect(prompt).toContain('{"query":"dsh","server":"dsh","limit":100}');
   expect(prompt).toContain('name "dsh:<wire_name>"');
+  expect(prompt).toContain('timeout_s:660');
   expect(prompt).toContain("Do not use dsh:codex_tool_inventory or dsh:codex_tool_call for recovery");
   expect(prompt).not.toContain("only as a compatibility fallback");
   expect(prompt).toContain("Report an invalid-token failure only when an actual tool response proves it");

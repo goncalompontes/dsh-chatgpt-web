@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 import shutil
 import tempfile
+import time
 
 
 async def main(args):
@@ -70,6 +71,7 @@ async def main(args):
 
     async def prompt(text, marker, required):
         start = len(updates)
+        began = time.monotonic()
         result = await request("session/prompt", {
             "sessionId": session, "prompt": [{"type": "text", "text": text}],
         })
@@ -81,6 +83,21 @@ async def main(args):
         assert result.get("stopReason") == "end_turn", result
         assert marker in answer.replace("\\_", "_"), answer
         assert required <= {u.get("title") for u in completed}, completed
+        if args.scenario == "load":
+            assert len(started) == 1 and len(completed) == 1, "Load check must execute exactly one foreground tool"
+            assert marker in json.dumps(completed[0].get("content", [])), "Native tool output did not contain the marker"
+            elapsed = time.monotonic() - began
+            assert elapsed >= args.load_seconds - 1, "Load command completed before its requested duration"
+            print(json.dumps({"loadDurationSeconds": elapsed}), flush=True)
+        if args.scenario in ("background", "background-long"):
+            assert sum(u.get("title") == "bash" for u in started.values()) == 1, "Background command was replayed"
+            for call in started.values():
+                if call.get("title") == "job_output" and "timeout_ms" in call.get("rawInput", {}):
+                    assert 0 <= call["rawInput"]["timeout_ms"] <= 30000, "Job poll exceeded 30 seconds"
+            collected = [u for u in completed if u.get("title") == "job_output"]
+            assert any(marker in json.dumps(u.get("content", [])) for u in collected), "Background output marker was not collected"
+            if args.scenario == "background-long":
+                assert time.monotonic() - began >= args.load_seconds - 1, "Background job ended before its requested duration"
         if args.scenario == "parallel-batch":
             assert sum(u.get("title") == "read" for u in completed) >= 2, completed
             starts = [index for index, update in enumerate(turn)
@@ -159,11 +176,13 @@ async def main(args):
             assert sorted(call["title"] for call in started.values()) == ["bash", "read"], started
             failed = [u for u in updates[start:] if u.get("sessionUpdate") == "tool_call_update" and u.get("status") == "failed"]
             assert len(failed) == 1 and failed[0]["title"] == "read", failed
-        elif args.scenario == "background":
+        elif args.scenario in ("background", "background-long"):
+            delay = args.load_seconds if args.scenario == "background-long" else 2
             started = await prompt(
-                "This is a read-only lifecycle smoke check. Use bash to run `sleep 2; printf DSH_BACKGROUND_OK` "
+                f"This is a read-only lifecycle smoke check. Use bash to run `sleep {delay}; printf DSH_BACKGROUND_OK` "
                 "with run_in_background=true. While it runs, read the first 5 lines of README.md using read. "
                 "Collect the job result using job_output. Reply DSH_BACKGROUND_OK only after confirming its output. "
+                "Use bounded job_output polls of at most 30 seconds if supported by the native schema. "
                 "Do not change files or run any other commands.", "DSH_BACKGROUND_OK", {"bash", "read", "job_output"},
             )
             assert any(u.get("title") == "bash" and u.get("rawInput", {}).get("run_in_background") is True
@@ -177,7 +196,10 @@ async def main(args):
             await prompt(
                 "This is a read-only lifecycle smoke check. Use bash exactly once to run "
                 + f"`{command}`. " +
-                "Then reply DSH_ACP_OK only. Do not modify files or run any other commands.", "DSH_ACP_OK", {"bash"},
+                "Then reply DSH_ACP_OK only. Do not modify files or run any other commands. "
+                + ("Keep bash in the foreground, set its native timeout long enough for the complete command, "
+                   "and wait for the actual output; do not background it." if args.scenario == "load" else ""),
+                "DSH_ACP_OK", {"bash"},
             )
             if args.scenario == "native-failure":
                 try:
@@ -298,7 +320,7 @@ if __name__ == "__main__":
     parser.add_argument("--dsh", default=shutil.which("dsh") or str(Path.home() / ".local/bin/dsh"))
     parser.add_argument("--cwd", default=str(Path.cwd()))
     parser.add_argument("--model", default="chatgpt-web/gpt-6-light")
-    parser.add_argument("--scenario", choices=("tool", "load", "background", "resume", "reconnect", "cancel", "parallel", "parallel-batch", "mixed-failure", "compact", "compact-active", "native-failure"), default="tool")
+    parser.add_argument("--scenario", choices=("tool", "load", "background", "background-long", "resume", "reconnect", "cancel", "parallel", "parallel-batch", "mixed-failure", "compact", "compact-active", "native-failure"), default="tool")
     parser.add_argument("--timeout", type=float, default=180)
     parser.add_argument("--load-seconds", type=int, default=30)
     parser.add_argument("--capture-updates", action="store_true", help="Retain private ACP update JSONL for consumer compatibility probes")
