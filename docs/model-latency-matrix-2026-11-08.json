@@ -1,0 +1,2236 @@
+{
+  "generatedAt": "2026-11-08T16:43:50Z",
+  "service": "dsh-chatgpt-web 1.0.5",
+  "catalog": [
+    "chatgpt-web/light",
+    "chatgpt-web/medium",
+    "chatgpt-web/high",
+    "chatgpt-web/gpt-6-light",
+    "chatgpt-web/gpt-6-medium",
+    "chatgpt-web/gpt-6-high"
+  ],
+  "method": {
+    "serialRuns": 3,
+    "models": 6,
+    "scenarioModels": [
+      "gpt-6-light",
+      "medium",
+      "gpt-6-high"
+    ],
+    "readTurns": "fresh + retained",
+    "scenarioCases": [
+      "answer",
+      "long"
+    ],
+    "longContextChars": 30000,
+    "concurrentWidths": [
+      3,
+      6
+    ],
+    "concurrentBatchesPerWidth": 2,
+    "timeoutSeconds": 300,
+    "externalTurnsDuringRun": 0
+  },
+  "turnCount": 71,
+  "serialTurnCount": 54,
+  "groups": [
+    {
+      "stage": "concurrency",
+      "case": "read",
+      "model": "gpt-6-light",
+      "turn": "fresh",
+      "width": 3,
+      "batch": 1,
+      "n": 3,
+      "hostSetupSeconds": {
+        "n": 3,
+        "median": 1.058,
+        "mean": 1.056,
+        "min": 1.045,
+        "max": 1.065
+      },
+      "toSendAcceptedSeconds": {
+        "n": 1,
+        "median": 4.13,
+        "mean": 4.13,
+        "min": 4.13,
+        "max": 4.13
+      },
+      "acceptedToFirstToolSeconds": {
+        "n": 1,
+        "median": 18.743,
+        "mean": 18.743,
+        "min": 18.743,
+        "max": 18.743
+      },
+      "toFirstToolSeconds": {
+        "n": 3,
+        "median": 50.137,
+        "mean": 49.77,
+        "min": 22.873,
+        "max": 76.301
+      },
+      "toolExecutionSeconds": {
+        "n": 3,
+        "median": 0.045,
+        "mean": 0.038,
+        "min": 0.018,
+        "max": 0.049
+      },
+      "acceptedToFirstAnswerSeconds": {
+        "n": 1,
+        "median": 26.363,
+        "mean": 26.363,
+        "min": 26.363,
+        "max": 26.363
+      },
+      "toFirstAnswerSeconds": {
+        "n": 3,
+        "median": 56.882,
+        "mean": 57.659,
+        "min": 30.493,
+        "max": 85.602
+      },
+      "totalSeconds": {
+        "n": 3,
+        "median": 56.887,
+        "mean": 57.665,
+        "min": 30.504,
+        "max": 85.605
+      }
+    },
+    {
+      "stage": "concurrency",
+      "case": "read",
+      "model": "gpt-6-light",
+      "turn": "fresh",
+      "width": 3,
+      "batch": 2,
+      "n": 3,
+      "hostSetupSeconds": {
+        "n": 3,
+        "median": 1.121,
+        "mean": 1.119,
+        "min": 1.111,
+        "max": 1.126
+      },
+      "toSendAcceptedSeconds": {
+        "n": 1,
+        "median": 3.805,
+        "mean": 3.805,
+        "min": 3.805,
+        "max": 3.805
+      },
+      "acceptedToFirstToolSeconds": {
+        "n": 1,
+        "median": 23.251,
+        "mean": 23.251,
+        "min": 23.251,
+        "max": 23.251
+      },
+      "toFirstToolSeconds": {
+        "n": 3,
+        "median": 50.839,
+        "mean": 53.346,
+        "min": 27.055,
+        "max": 82.142
+      },
+      "toolExecutionSeconds": {
+        "n": 3,
+        "median": 0.035,
+        "mean": 0.035,
+        "min": 0.014,
+        "max": 0.056
+      },
+      "acceptedToFirstAnswerSeconds": {
+        "n": 1,
+        "median": 29.861,
+        "mean": 29.861,
+        "min": 29.861,
+        "max": 29.861
+      },
+      "toFirstAnswerSeconds": {
+        "n": 3,
+        "median": 58.113,
+        "mean": 60.439,
+        "min": 33.666,
+        "max": 89.537
+      },
+      "totalSeconds": {
+        "n": 3,
+        "median": 58.116,
+        "mean": 60.443,
+        "min": 33.669,
+        "max": 89.543
+      }
+    },
+    {
+      "stage": "concurrency",
+      "case": "read",
+      "model": "gpt-6-light",
+      "turn": "fresh",
+      "width": 6,
+      "batch": 1,
+      "n": 5,
+      "hostSetupSeconds": {
+        "n": 5,
+        "median": 1.346,
+        "mean": 1.374,
+        "min": 1.315,
+        "max": 1.455
+      },
+      "toSendAcceptedSeconds": {
+        "n": 1,
+        "median": 4.738,
+        "mean": 4.738,
+        "min": 4.738,
+        "max": 4.738
+      },
+      "acceptedToFirstToolSeconds": {
+        "n": 1,
+        "median": 11.305,
+        "mean": 11.305,
+        "min": 11.305,
+        "max": 11.305
+      },
+      "toFirstToolSeconds": {
+        "n": 5,
+        "median": 69.093,
+        "mean": 80.95,
+        "min": 16.043,
+        "max": 151.642
+      },
+      "toolExecutionSeconds": {
+        "n": 5,
+        "median": 0.013,
+        "mean": 0.042,
+        "min": 0.01,
+        "max": 0.096
+      },
+      "acceptedToFirstAnswerSeconds": {
+        "n": 1,
+        "median": 18.181,
+        "mean": 18.181,
+        "min": 18.181,
+        "max": 18.181
+      },
+      "toFirstAnswerSeconds": {
+        "n": 5,
+        "median": 77.125,
+        "mean": 88.211,
+        "min": 22.919,
+        "max": 158.872
+      },
+      "totalSeconds": {
+        "n": 5,
+        "median": 77.128,
+        "mean": 88.216,
+        "min": 22.922,
+        "max": 158.876
+      }
+    },
+    {
+      "stage": "concurrency",
+      "case": "read",
+      "model": "gpt-6-light",
+      "turn": "fresh",
+      "width": 6,
+      "batch": 2,
+      "n": 6,
+      "hostSetupSeconds": {
+        "n": 6,
+        "median": 1.357,
+        "mean": 1.358,
+        "min": 1.301,
+        "max": 1.42
+      },
+      "toSendAcceptedSeconds": {
+        "n": 1,
+        "median": 3.959,
+        "mean": 3.959,
+        "min": 3.959,
+        "max": 3.959
+      },
+      "acceptedToFirstToolSeconds": {
+        "n": 1,
+        "median": 16.19,
+        "mean": 16.19,
+        "min": 16.19,
+        "max": 16.19
+      },
+      "toFirstToolSeconds": {
+        "n": 6,
+        "median": 70.921,
+        "mean": 67.513,
+        "min": 20.149,
+        "max": 100.614
+      },
+      "toolExecutionSeconds": {
+        "n": 6,
+        "median": 0.011,
+        "mean": 0.025,
+        "min": 0.008,
+        "max": 0.06
+      },
+      "acceptedToFirstAnswerSeconds": {
+        "n": 1,
+        "median": 23.527,
+        "mean": 23.527,
+        "min": 23.527,
+        "max": 23.527
+      },
+      "toFirstAnswerSeconds": {
+        "n": 6,
+        "median": 77.76,
+        "mean": 74.561,
+        "min": 27.486,
+        "max": 107.669
+      },
+      "totalSeconds": {
+        "n": 6,
+        "median": 77.764,
+        "mean": 74.564,
+        "min": 27.49,
+        "max": 107.671
+      }
+    },
+    {
+      "stage": "serial",
+      "case": "answer",
+      "model": "gpt-6-high",
+      "turn": "fresh",
+      "width": 1,
+      "batch": 0,
+      "n": 3,
+      "hostSetupSeconds": {
+        "n": 3,
+        "median": 0.879,
+        "mean": 0.901,
+        "min": 0.864,
+        "max": 0.961
+      },
+      "toSendAcceptedSeconds": {
+        "n": 3,
+        "median": 3.909,
+        "mean": 4.864,
+        "min": 3.856,
+        "max": 6.828
+      },
+      "acceptedToFirstToolSeconds": null,
+      "toFirstToolSeconds": null,
+      "toolExecutionSeconds": null,
+      "acceptedToFirstAnswerSeconds": {
+        "n": 3,
+        "median": 9.847,
+        "mean": 10.09,
+        "min": 9.425,
+        "max": 10.997
+      },
+      "toFirstAnswerSeconds": {
+        "n": 3,
+        "median": 14.907,
+        "mean": 14.954,
+        "min": 13.28,
+        "max": 16.675
+      },
+      "totalSeconds": {
+        "n": 3,
+        "median": 14.909,
+        "mean": 14.957,
+        "min": 13.284,
+        "max": 16.677
+      }
+    },
+    {
+      "stage": "serial",
+      "case": "answer",
+      "model": "gpt-6-light",
+      "turn": "fresh",
+      "width": 1,
+      "batch": 0,
+      "n": 3,
+      "hostSetupSeconds": {
+        "n": 3,
+        "median": 0.904,
+        "mean": 0.902,
+        "min": 0.888,
+        "max": 0.914
+      },
+      "toSendAcceptedSeconds": {
+        "n": 3,
+        "median": 3.953,
+        "mean": 3.929,
+        "min": 3.8,
+        "max": 4.032
+      },
+      "acceptedToFirstToolSeconds": null,
+      "toFirstToolSeconds": null,
+      "toolExecutionSeconds": null,
+      "acceptedToFirstAnswerSeconds": {
+        "n": 3,
+        "median": 10.988,
+        "mean": 10.761,
+        "min": 9.121,
+        "max": 12.175
+      },
+      "toFirstAnswerSeconds": {
+        "n": 3,
+        "median": 14.941,
+        "mean": 14.69,
+        "min": 12.921,
+        "max": 16.207
+      },
+      "totalSeconds": {
+        "n": 3,
+        "median": 14.944,
+        "mean": 14.693,
+        "min": 12.923,
+        "max": 16.21
+      }
+    },
+    {
+      "stage": "serial",
+      "case": "answer",
+      "model": "medium",
+      "turn": "fresh",
+      "width": 1,
+      "batch": 0,
+      "n": 3,
+      "hostSetupSeconds": {
+        "n": 3,
+        "median": 0.878,
+        "mean": 0.885,
+        "min": 0.872,
+        "max": 0.903
+      },
+      "toSendAcceptedSeconds": {
+        "n": 3,
+        "median": 4.013,
+        "mean": 3.984,
+        "min": 3.854,
+        "max": 4.084
+      },
+      "acceptedToFirstToolSeconds": null,
+      "toFirstToolSeconds": null,
+      "toolExecutionSeconds": null,
+      "acceptedToFirstAnswerSeconds": {
+        "n": 3,
+        "median": 11.239,
+        "mean": 13.045,
+        "min": 11.056,
+        "max": 16.841
+      },
+      "toFirstAnswerSeconds": {
+        "n": 3,
+        "median": 15.324,
+        "mean": 17.029,
+        "min": 15.069,
+        "max": 20.695
+      },
+      "totalSeconds": {
+        "n": 3,
+        "median": 15.326,
+        "mean": 17.032,
+        "min": 15.072,
+        "max": 20.698
+      }
+    },
+    {
+      "stage": "serial",
+      "case": "long",
+      "model": "gpt-6-high",
+      "turn": "fresh",
+      "width": 1,
+      "batch": 0,
+      "n": 3,
+      "hostSetupSeconds": {
+        "n": 3,
+        "median": 0.913,
+        "mean": 0.912,
+        "min": 0.883,
+        "max": 0.941
+      },
+      "toSendAcceptedSeconds": {
+        "n": 3,
+        "median": 3.802,
+        "mean": 3.848,
+        "min": 3.791,
+        "max": 3.951
+      },
+      "acceptedToFirstToolSeconds": null,
+      "toFirstToolSeconds": null,
+      "toolExecutionSeconds": null,
+      "acceptedToFirstAnswerSeconds": {
+        "n": 3,
+        "median": 11.183,
+        "mean": 16.197,
+        "min": 10.657,
+        "max": 26.75
+      },
+      "toFirstAnswerSeconds": {
+        "n": 3,
+        "median": 14.975,
+        "mean": 20.045,
+        "min": 14.459,
+        "max": 30.701
+      },
+      "totalSeconds": {
+        "n": 3,
+        "median": 14.978,
+        "mean": 20.048,
+        "min": 14.462,
+        "max": 30.703
+      }
+    },
+    {
+      "stage": "serial",
+      "case": "long",
+      "model": "gpt-6-light",
+      "turn": "fresh",
+      "width": 1,
+      "batch": 0,
+      "n": 3,
+      "hostSetupSeconds": {
+        "n": 3,
+        "median": 0.897,
+        "mean": 0.899,
+        "min": 0.894,
+        "max": 0.908
+      },
+      "toSendAcceptedSeconds": {
+        "n": 3,
+        "median": 3.769,
+        "mean": 3.799,
+        "min": 3.738,
+        "max": 3.89
+      },
+      "acceptedToFirstToolSeconds": null,
+      "toFirstToolSeconds": null,
+      "toolExecutionSeconds": null,
+      "acceptedToFirstAnswerSeconds": {
+        "n": 3,
+        "median": 12.999,
+        "mean": 10.968,
+        "min": 6.749,
+        "max": 13.157
+      },
+      "toFirstAnswerSeconds": {
+        "n": 3,
+        "median": 16.889,
+        "mean": 14.767,
+        "min": 10.487,
+        "max": 16.926
+      },
+      "totalSeconds": {
+        "n": 3,
+        "median": 16.891,
+        "mean": 14.77,
+        "min": 10.49,
+        "max": 16.929
+      }
+    },
+    {
+      "stage": "serial",
+      "case": "long",
+      "model": "medium",
+      "turn": "fresh",
+      "width": 1,
+      "batch": 0,
+      "n": 3,
+      "hostSetupSeconds": {
+        "n": 3,
+        "median": 0.896,
+        "mean": 0.896,
+        "min": 0.884,
+        "max": 0.908
+      },
+      "toSendAcceptedSeconds": {
+        "n": 3,
+        "median": 3.97,
+        "mean": 3.997,
+        "min": 3.965,
+        "max": 4.057
+      },
+      "acceptedToFirstToolSeconds": null,
+      "toFirstToolSeconds": null,
+      "toolExecutionSeconds": null,
+      "acceptedToFirstAnswerSeconds": {
+        "n": 3,
+        "median": 10.022,
+        "mean": 9.979,
+        "min": 8.949,
+        "max": 10.967
+      },
+      "toFirstAnswerSeconds": {
+        "n": 3,
+        "median": 14.079,
+        "mean": 13.976,
+        "min": 12.919,
+        "max": 14.932
+      },
+      "totalSeconds": {
+        "n": 3,
+        "median": 14.081,
+        "mean": 13.979,
+        "min": 12.921,
+        "max": 14.936
+      }
+    },
+    {
+      "stage": "serial",
+      "case": "read",
+      "model": "gpt-6-high",
+      "turn": "fresh",
+      "width": 1,
+      "batch": 0,
+      "n": 3,
+      "hostSetupSeconds": {
+        "n": 3,
+        "median": 0.898,
+        "mean": 0.912,
+        "min": 0.871,
+        "max": 0.967
+      },
+      "toSendAcceptedSeconds": {
+        "n": 3,
+        "median": 3.694,
+        "mean": 3.719,
+        "min": 3.565,
+        "max": 3.899
+      },
+      "acceptedToFirstToolSeconds": {
+        "n": 3,
+        "median": 24.376,
+        "mean": 23.712,
+        "min": 20.851,
+        "max": 25.91
+      },
+      "toFirstToolSeconds": {
+        "n": 3,
+        "median": 27.941,
+        "mean": 27.432,
+        "min": 24.751,
+        "max": 29.604
+      },
+      "toolExecutionSeconds": {
+        "n": 3,
+        "median": 0.051,
+        "mean": 0.039,
+        "min": 0.015,
+        "max": 0.051
+      },
+      "acceptedToFirstAnswerSeconds": {
+        "n": 3,
+        "median": 33.402,
+        "mean": 33.538,
+        "min": 31.8,
+        "max": 35.413
+      },
+      "toFirstAnswerSeconds": {
+        "n": 3,
+        "median": 37.096,
+        "mean": 37.258,
+        "min": 35.365,
+        "max": 39.312
+      },
+      "totalSeconds": {
+        "n": 3,
+        "median": 37.104,
+        "mean": 37.263,
+        "min": 35.368,
+        "max": 39.317
+      }
+    },
+    {
+      "stage": "serial",
+      "case": "read",
+      "model": "gpt-6-high",
+      "turn": "retained",
+      "width": 1,
+      "batch": 0,
+      "n": 3,
+      "hostSetupSeconds": null,
+      "toSendAcceptedSeconds": {
+        "n": 3,
+        "median": 1.028,
+        "mean": 1.048,
+        "min": 1.02,
+        "max": 1.095
+      },
+      "acceptedToFirstToolSeconds": {
+        "n": 3,
+        "median": 7.564,
+        "mean": 7.786,
+        "min": 7.193,
+        "max": 8.6
+      },
+      "toFirstToolSeconds": {
+        "n": 3,
+        "median": 8.583,
+        "mean": 8.833,
+        "min": 8.288,
+        "max": 9.629
+      },
+      "toolExecutionSeconds": {
+        "n": 3,
+        "median": 0.01,
+        "mean": 0.024,
+        "min": 0.008,
+        "max": 0.053
+      },
+      "acceptedToFirstAnswerSeconds": {
+        "n": 3,
+        "median": 14.045,
+        "mean": 20.06,
+        "min": 13.953,
+        "max": 32.182
+      },
+      "toFirstAnswerSeconds": {
+        "n": 3,
+        "median": 15.065,
+        "mean": 21.108,
+        "min": 15.048,
+        "max": 33.211
+      },
+      "totalSeconds": {
+        "n": 3,
+        "median": 15.069,
+        "mean": 21.111,
+        "min": 15.052,
+        "max": 33.213
+      }
+    },
+    {
+      "stage": "serial",
+      "case": "read",
+      "model": "gpt-6-light",
+      "turn": "fresh",
+      "width": 1,
+      "batch": 0,
+      "n": 3,
+      "hostSetupSeconds": {
+        "n": 3,
+        "median": 0.96,
+        "mean": 0.968,
+        "min": 0.934,
+        "max": 1.009
+      },
+      "toSendAcceptedSeconds": {
+        "n": 3,
+        "median": 3.885,
+        "mean": 4.324,
+        "min": 3.879,
+        "max": 5.209
+      },
+      "acceptedToFirstToolSeconds": {
+        "n": 3,
+        "median": 16.005,
+        "mean": 15.886,
+        "min": 13.374,
+        "max": 18.279
+      },
+      "toFirstToolSeconds": {
+        "n": 3,
+        "median": 19.891,
+        "mean": 20.21,
+        "min": 18.583,
+        "max": 22.158
+      },
+      "toolExecutionSeconds": {
+        "n": 3,
+        "median": 0.052,
+        "mean": 0.053,
+        "min": 0.027,
+        "max": 0.08
+      },
+      "acceptedToFirstAnswerSeconds": {
+        "n": 3,
+        "median": 23.195,
+        "mean": 22.965,
+        "min": 20.254,
+        "max": 25.448
+      },
+      "toFirstAnswerSeconds": {
+        "n": 3,
+        "median": 27.08,
+        "mean": 27.29,
+        "min": 25.463,
+        "max": 29.326
+      },
+      "totalSeconds": {
+        "n": 3,
+        "median": 27.09,
+        "mean": 27.296,
+        "min": 25.468,
+        "max": 29.329
+      }
+    },
+    {
+      "stage": "serial",
+      "case": "read",
+      "model": "gpt-6-light",
+      "turn": "retained",
+      "width": 1,
+      "batch": 0,
+      "n": 3,
+      "hostSetupSeconds": null,
+      "toSendAcceptedSeconds": {
+        "n": 3,
+        "median": 1.09,
+        "mean": 1.091,
+        "min": 1.068,
+        "max": 1.114
+      },
+      "acceptedToFirstToolSeconds": {
+        "n": 3,
+        "median": 7.875,
+        "mean": 10.005,
+        "min": 5.717,
+        "max": 16.422
+      },
+      "toFirstToolSeconds": {
+        "n": 3,
+        "median": 8.944,
+        "mean": 11.096,
+        "min": 6.808,
+        "max": 17.536
+      },
+      "toolExecutionSeconds": {
+        "n": 3,
+        "median": 0.041,
+        "mean": 0.039,
+        "min": 0.007,
+        "max": 0.068
+      },
+      "acceptedToFirstAnswerSeconds": {
+        "n": 3,
+        "median": 14.79,
+        "mean": 16.889,
+        "min": 12.401,
+        "max": 23.477
+      },
+      "toFirstAnswerSeconds": {
+        "n": 3,
+        "median": 15.858,
+        "mean": 17.98,
+        "min": 13.492,
+        "max": 24.59
+      },
+      "totalSeconds": {
+        "n": 3,
+        "median": 15.86,
+        "mean": 17.985,
+        "min": 13.495,
+        "max": 24.599
+      }
+    },
+    {
+      "stage": "serial",
+      "case": "read",
+      "model": "gpt-6-medium",
+      "turn": "fresh",
+      "width": 1,
+      "batch": 0,
+      "n": 3,
+      "hostSetupSeconds": {
+        "n": 3,
+        "median": 0.914,
+        "mean": 0.934,
+        "min": 0.914,
+        "max": 0.973
+      },
+      "toSendAcceptedSeconds": {
+        "n": 3,
+        "median": 3.827,
+        "mean": 3.826,
+        "min": 3.744,
+        "max": 3.909
+      },
+      "acceptedToFirstToolSeconds": {
+        "n": 3,
+        "median": 25.493,
+        "mean": 25.764,
+        "min": 23.14,
+        "max": 28.659
+      },
+      "toFirstToolSeconds": {
+        "n": 3,
+        "median": 29.401,
+        "mean": 29.591,
+        "min": 26.884,
+        "max": 32.487
+      },
+      "toolExecutionSeconds": {
+        "n": 3,
+        "median": 0.014,
+        "mean": 0.042,
+        "min": 0.009,
+        "max": 0.103
+      },
+      "acceptedToFirstAnswerSeconds": {
+        "n": 3,
+        "median": 34.239,
+        "mean": 33.656,
+        "min": 30.28,
+        "max": 36.448
+      },
+      "toFirstAnswerSeconds": {
+        "n": 3,
+        "median": 38.148,
+        "mean": 37.482,
+        "min": 34.024,
+        "max": 40.275
+      },
+      "totalSeconds": {
+        "n": 3,
+        "median": 38.153,
+        "mean": 37.487,
+        "min": 34.03,
+        "max": 40.279
+      }
+    },
+    {
+      "stage": "serial",
+      "case": "read",
+      "model": "gpt-6-medium",
+      "turn": "retained",
+      "width": 1,
+      "batch": 0,
+      "n": 3,
+      "hostSetupSeconds": null,
+      "toSendAcceptedSeconds": {
+        "n": 3,
+        "median": 1.118,
+        "mean": 1.104,
+        "min": 1.015,
+        "max": 1.18
+      },
+      "acceptedToFirstToolSeconds": {
+        "n": 3,
+        "median": 7.208,
+        "mean": 7.399,
+        "min": 6.91,
+        "max": 8.078
+      },
+      "toFirstToolSeconds": {
+        "n": 3,
+        "median": 8.326,
+        "mean": 8.503,
+        "min": 8.089,
+        "max": 9.093
+      },
+      "toolExecutionSeconds": {
+        "n": 3,
+        "median": 0.061,
+        "mean": 0.05,
+        "min": 0.012,
+        "max": 0.077
+      },
+      "acceptedToFirstAnswerSeconds": {
+        "n": 3,
+        "median": 14.033,
+        "mean": 14.069,
+        "min": 13.608,
+        "max": 14.564
+      },
+      "toFirstAnswerSeconds": {
+        "n": 3,
+        "median": 15.213,
+        "mean": 15.173,
+        "min": 14.726,
+        "max": 15.579
+      },
+      "totalSeconds": {
+        "n": 3,
+        "median": 15.217,
+        "mean": 15.178,
+        "min": 14.733,
+        "max": 15.584
+      }
+    },
+    {
+      "stage": "serial",
+      "case": "read",
+      "model": "high",
+      "turn": "fresh",
+      "width": 1,
+      "batch": 0,
+      "n": 3,
+      "hostSetupSeconds": {
+        "n": 3,
+        "median": 0.876,
+        "mean": 0.903,
+        "min": 0.852,
+        "max": 0.98
+      },
+      "toSendAcceptedSeconds": {
+        "n": 3,
+        "median": 3.895,
+        "mean": 3.965,
+        "min": 3.868,
+        "max": 4.132
+      },
+      "acceptedToFirstToolSeconds": {
+        "n": 3,
+        "median": 22.673,
+        "mean": 24.027,
+        "min": 17.281,
+        "max": 32.127
+      },
+      "toFirstToolSeconds": {
+        "n": 3,
+        "median": 26.54,
+        "mean": 27.992,
+        "min": 21.413,
+        "max": 36.022
+      },
+      "toolExecutionSeconds": {
+        "n": 3,
+        "median": 0.014,
+        "mean": 0.03,
+        "min": 0.01,
+        "max": 0.065
+      },
+      "acceptedToFirstAnswerSeconds": {
+        "n": 3,
+        "median": 30.034,
+        "mean": 32.112,
+        "min": 26.214,
+        "max": 40.088
+      },
+      "toFirstAnswerSeconds": {
+        "n": 3,
+        "median": 33.901,
+        "mean": 36.076,
+        "min": 30.346,
+        "max": 43.982
+      },
+      "totalSeconds": {
+        "n": 3,
+        "median": 33.904,
+        "mean": 36.08,
+        "min": 30.35,
+        "max": 43.987
+      }
+    },
+    {
+      "stage": "serial",
+      "case": "read",
+      "model": "high",
+      "turn": "retained",
+      "width": 1,
+      "batch": 0,
+      "n": 3,
+      "hostSetupSeconds": null,
+      "toSendAcceptedSeconds": {
+        "n": 3,
+        "median": 1.165,
+        "mean": 1.246,
+        "min": 1.018,
+        "max": 1.555
+      },
+      "acceptedToFirstToolSeconds": {
+        "n": 3,
+        "median": 7.224,
+        "mean": 14.959,
+        "min": 6.509,
+        "max": 31.143
+      },
+      "toFirstToolSeconds": {
+        "n": 3,
+        "median": 8.779,
+        "mean": 16.204,
+        "min": 7.673,
+        "max": 32.16
+      },
+      "toolExecutionSeconds": {
+        "n": 3,
+        "median": 0.037,
+        "mean": 0.031,
+        "min": 0.008,
+        "max": 0.046
+      },
+      "acceptedToFirstAnswerSeconds": {
+        "n": 3,
+        "median": 14.081,
+        "mean": 21.048,
+        "min": 12.892,
+        "max": 36.172
+      },
+      "toFirstAnswerSeconds": {
+        "n": 3,
+        "median": 15.636,
+        "mean": 22.294,
+        "min": 14.057,
+        "max": 37.19
+      },
+      "totalSeconds": {
+        "n": 3,
+        "median": 15.641,
+        "mean": 22.298,
+        "min": 14.06,
+        "max": 37.193
+      }
+    },
+    {
+      "stage": "serial",
+      "case": "read",
+      "model": "light",
+      "turn": "fresh",
+      "width": 1,
+      "batch": 0,
+      "n": 3,
+      "hostSetupSeconds": {
+        "n": 3,
+        "median": 0.89,
+        "mean": 0.887,
+        "min": 0.861,
+        "max": 0.909
+      },
+      "toSendAcceptedSeconds": {
+        "n": 3,
+        "median": 3.982,
+        "mean": 3.995,
+        "min": 3.935,
+        "max": 4.069
+      },
+      "acceptedToFirstToolSeconds": {
+        "n": 3,
+        "median": 10.873,
+        "mean": 12.529,
+        "min": 10.781,
+        "max": 15.932
+      },
+      "toFirstToolSeconds": {
+        "n": 3,
+        "median": 14.856,
+        "mean": 16.524,
+        "min": 14.85,
+        "max": 19.867
+      },
+      "toolExecutionSeconds": {
+        "n": 3,
+        "median": 0.038,
+        "mean": 0.04,
+        "min": 0.016,
+        "max": 0.065
+      },
+      "acceptedToFirstAnswerSeconds": {
+        "n": 3,
+        "median": 22.855,
+        "mean": 21.416,
+        "min": 17.959,
+        "max": 23.433
+      },
+      "toFirstAnswerSeconds": {
+        "n": 3,
+        "median": 26.924,
+        "mean": 25.411,
+        "min": 21.942,
+        "max": 27.367
+      },
+      "totalSeconds": {
+        "n": 3,
+        "median": 26.929,
+        "mean": 25.414,
+        "min": 21.944,
+        "max": 27.37
+      }
+    },
+    {
+      "stage": "serial",
+      "case": "read",
+      "model": "light",
+      "turn": "retained",
+      "width": 1,
+      "batch": 0,
+      "n": 3,
+      "hostSetupSeconds": null,
+      "toSendAcceptedSeconds": {
+        "n": 3,
+        "median": 1.208,
+        "mean": 1.305,
+        "min": 1.181,
+        "max": 1.527
+      },
+      "acceptedToFirstToolSeconds": {
+        "n": 3,
+        "median": 7.38,
+        "mean": 8.03,
+        "min": 7.057,
+        "max": 9.653
+      },
+      "toFirstToolSeconds": {
+        "n": 3,
+        "median": 8.907,
+        "mean": 9.335,
+        "min": 8.238,
+        "max": 10.861
+      },
+      "toolExecutionSeconds": {
+        "n": 3,
+        "median": 0.016,
+        "mean": 0.025,
+        "min": 0.01,
+        "max": 0.05
+      },
+      "acceptedToFirstAnswerSeconds": {
+        "n": 3,
+        "median": 12.814,
+        "mean": 14.024,
+        "min": 11.803,
+        "max": 17.456
+      },
+      "toFirstAnswerSeconds": {
+        "n": 3,
+        "median": 14.341,
+        "mean": 15.33,
+        "min": 12.984,
+        "max": 18.664
+      },
+      "totalSeconds": {
+        "n": 3,
+        "median": 14.343,
+        "mean": 15.332,
+        "min": 12.986,
+        "max": 18.669
+      }
+    },
+    {
+      "stage": "serial",
+      "case": "read",
+      "model": "medium",
+      "turn": "fresh",
+      "width": 1,
+      "batch": 0,
+      "n": 3,
+      "hostSetupSeconds": {
+        "n": 3,
+        "median": 0.906,
+        "mean": 0.921,
+        "min": 0.865,
+        "max": 0.992
+      },
+      "toSendAcceptedSeconds": {
+        "n": 3,
+        "median": 3.985,
+        "mean": 4.003,
+        "min": 3.984,
+        "max": 4.039
+      },
+      "acceptedToFirstToolSeconds": {
+        "n": 3,
+        "median": 20.239,
+        "mean": 20.949,
+        "min": 16.069,
+        "max": 26.538
+      },
+      "toFirstToolSeconds": {
+        "n": 3,
+        "median": 24.278,
+        "mean": 24.951,
+        "min": 20.053,
+        "max": 30.523
+      },
+      "toolExecutionSeconds": {
+        "n": 3,
+        "median": 0.062,
+        "mean": 0.05,
+        "min": 0.015,
+        "max": 0.073
+      },
+      "acceptedToFirstAnswerSeconds": {
+        "n": 3,
+        "median": 27.471,
+        "mean": 28.348,
+        "min": 23.054,
+        "max": 34.519
+      },
+      "toFirstAnswerSeconds": {
+        "n": 3,
+        "median": 31.51,
+        "mean": 32.351,
+        "min": 27.038,
+        "max": 38.504
+      },
+      "totalSeconds": {
+        "n": 3,
+        "median": 31.514,
+        "mean": 32.355,
+        "min": 27.044,
+        "max": 38.506
+      }
+    },
+    {
+      "stage": "serial",
+      "case": "read",
+      "model": "medium",
+      "turn": "retained",
+      "width": 1,
+      "batch": 0,
+      "n": 3,
+      "hostSetupSeconds": null,
+      "toSendAcceptedSeconds": {
+        "n": 3,
+        "median": 1.047,
+        "mean": 1.101,
+        "min": 1.036,
+        "max": 1.22
+      },
+      "acceptedToFirstToolSeconds": {
+        "n": 3,
+        "median": 14.212,
+        "mean": 19.878,
+        "min": 8.345,
+        "max": 37.078
+      },
+      "toFirstToolSeconds": {
+        "n": 3,
+        "median": 15.26,
+        "mean": 20.979,
+        "min": 9.38,
+        "max": 38.297
+      },
+      "toolExecutionSeconds": {
+        "n": 3,
+        "median": 0.056,
+        "mean": 0.07,
+        "min": 0.015,
+        "max": 0.139
+      },
+      "acceptedToFirstAnswerSeconds": {
+        "n": 3,
+        "median": 20.388,
+        "mean": 27.886,
+        "min": 14.359,
+        "max": 48.912
+      },
+      "toFirstAnswerSeconds": {
+        "n": 3,
+        "median": 21.435,
+        "mean": 28.987,
+        "min": 15.394,
+        "max": 50.131
+      },
+      "totalSeconds": {
+        "n": 3,
+        "median": 21.437,
+        "mean": 28.99,
+        "min": 15.398,
+        "max": 50.136
+      }
+    }
+  ],
+  "concurrency": [
+    {
+      "width": 3,
+      "batch": 1,
+      "turns": 3,
+      "wallSeconds": 86.845,
+      "queueWaitDeltaMs": 87177.926,
+      "medianTurnSeconds": 56.887,
+      "turnsPerMinute": 2.07
+    },
+    {
+      "width": 3,
+      "batch": 2,
+      "turns": 3,
+      "wallSeconds": 90.866,
+      "queueWaitDeltaMs": 91567.398,
+      "medianTurnSeconds": 58.116,
+      "turnsPerMinute": 1.98
+    },
+    {
+      "width": 6,
+      "batch": 1,
+      "turns": 5,
+      "wallSeconds": 160.505,
+      "queueWaitDeltaMs": 389664.434,
+      "medianTurnSeconds": 77.128,
+      "turnsPerMinute": 1.87
+    },
+    {
+      "width": 6,
+      "batch": 2,
+      "turns": 6,
+      "wallSeconds": 109.213,
+      "queueWaitDeltaMs": 287347.755,
+      "medianTurnSeconds": 77.764,
+      "turnsPerMinute": 3.3
+    }
+  ],
+  "failures": [
+    {
+      "job": "concurrency-read-gpt-6-light-r2-w6b1",
+      "exit": 1,
+      "quota": false,
+      "message": "AssertionError: Unable to complete: the direct DSH `read` tool is not exposed in this session."
+    }
+  ],
+  "turns": [
+    {
+      "model": "chatgpt-web/light",
+      "case": "read",
+      "turn": "fresh",
+      "run": 1,
+      "width": 1,
+      "batch": 0,
+      "hostSetupSeconds": 0.9091148376464844,
+      "toSendAcceptedSeconds": 3.9824180603027344,
+      "acceptedToFirstToolSeconds": 10.873382091522217,
+      "toFirstToolSeconds": 14.855800151824951,
+      "toolExecutionSeconds": 0.0375065803527832,
+      "toFirstAnswerSeconds": 21.941855907440186,
+      "totalSeconds": 21.9438747910026,
+      "retainedPage": false
+    },
+    {
+      "model": "chatgpt-web/light",
+      "case": "read",
+      "turn": "retained",
+      "run": 1,
+      "width": 1,
+      "batch": 0,
+      "hostSetupSeconds": null,
+      "toSendAcceptedSeconds": 1.1807162761688232,
+      "acceptedToFirstToolSeconds": 7.056989908218384,
+      "toFirstToolSeconds": 8.237706184387207,
+      "toolExecutionSeconds": 0.04963350296020508,
+      "toFirstAnswerSeconds": 12.984188795089722,
+      "totalSeconds": 12.986188906004827,
+      "retainedPage": true
+    },
+    {
+      "model": "chatgpt-web/medium",
+      "case": "read",
+      "turn": "fresh",
+      "run": 1,
+      "width": 1,
+      "batch": 0,
+      "hostSetupSeconds": 0.9916067123413086,
+      "toSendAcceptedSeconds": 3.9850666522979736,
+      "acceptedToFirstToolSeconds": 26.53819489479065,
+      "toFirstToolSeconds": 30.523261547088623,
+      "toolExecutionSeconds": 0.015429019927978516,
+      "toFirstAnswerSeconds": 38.50405693054199,
+      "totalSeconds": 38.5057145039973,
+      "retainedPage": false
+    },
+    {
+      "model": "chatgpt-web/medium",
+      "case": "read",
+      "turn": "retained",
+      "run": 1,
+      "width": 1,
+      "batch": 0,
+      "hostSetupSeconds": null,
+      "toSendAcceptedSeconds": 1.0473971366882324,
+      "acceptedToFirstToolSeconds": 14.21244502067566,
+      "toFirstToolSeconds": 15.259842157363892,
+      "toolExecutionSeconds": 0.015238046646118164,
+      "toFirstAnswerSeconds": 21.434911966323853,
+      "totalSeconds": 21.43692956900486,
+      "retainedPage": true
+    },
+    {
+      "model": "chatgpt-web/high",
+      "case": "read",
+      "turn": "fresh",
+      "run": 1,
+      "width": 1,
+      "batch": 0,
+      "hostSetupSeconds": 0.8760471343994141,
+      "toSendAcceptedSeconds": 3.8675458431243896,
+      "acceptedToFirstToolSeconds": 22.672508001327515,
+      "toFirstToolSeconds": 26.540053844451904,
+      "toolExecutionSeconds": 0.013975858688354492,
+      "toFirstAnswerSeconds": 33.901450634002686,
+      "totalSeconds": 33.90448108899727,
+      "retainedPage": false
+    },
+    {
+      "model": "chatgpt-web/high",
+      "case": "read",
+      "turn": "retained",
+      "run": 1,
+      "width": 1,
+      "batch": 0,
+      "hostSetupSeconds": null,
+      "toSendAcceptedSeconds": 1.017864465713501,
+      "acceptedToFirstToolSeconds": 31.14260768890381,
+      "toFirstToolSeconds": 32.16047215461731,
+      "toolExecutionSeconds": 0.03737807273864746,
+      "toFirstAnswerSeconds": 37.18979215621948,
+      "totalSeconds": 37.193446474004304,
+      "retainedPage": true
+    },
+    {
+      "model": "chatgpt-web/gpt-6-light",
+      "case": "read",
+      "turn": "fresh",
+      "run": 1,
+      "width": 1,
+      "batch": 0,
+      "hostSetupSeconds": 0.9339332580566406,
+      "toSendAcceptedSeconds": 3.878788709640503,
+      "acceptedToFirstToolSeconds": 18.27927303314209,
+      "toFirstToolSeconds": 22.158061742782593,
+      "toolExecutionSeconds": 0.051558732986450195,
+      "toFirstAnswerSeconds": 29.326492309570312,
+      "totalSeconds": 29.328506518999347,
+      "retainedPage": false
+    },
+    {
+      "model": "chatgpt-web/gpt-6-light",
+      "case": "read",
+      "turn": "retained",
+      "run": 1,
+      "width": 1,
+      "batch": 0,
+      "hostSetupSeconds": null,
+      "toSendAcceptedSeconds": 1.0904643535614014,
+      "acceptedToFirstToolSeconds": 5.717386245727539,
+      "toFirstToolSeconds": 6.80785059928894,
+      "toolExecutionSeconds": 0.06839323043823242,
+      "toFirstAnswerSeconds": 13.49173378944397,
+      "totalSeconds": 13.495296057000814,
+      "retainedPage": true
+    },
+    {
+      "model": "chatgpt-web/gpt-6-medium",
+      "case": "read",
+      "turn": "fresh",
+      "run": 1,
+      "width": 1,
+      "batch": 0,
+      "hostSetupSeconds": 0.973334789276123,
+      "toSendAcceptedSeconds": 3.7436728477478027,
+      "acceptedToFirstToolSeconds": 23.14029288291931,
+      "toFirstToolSeconds": 26.883965730667114,
+      "toolExecutionSeconds": 0.1027982234954834,
+      "toFirstAnswerSeconds": 34.02400541305542,
+      "totalSeconds": 34.0300494539988,
+      "retainedPage": false
+    },
+    {
+      "model": "chatgpt-web/gpt-6-medium",
+      "case": "read",
+      "turn": "retained",
+      "run": 1,
+      "width": 1,
+      "batch": 0,
+      "hostSetupSeconds": null,
+      "toSendAcceptedSeconds": 1.117922067642212,
+      "acceptedToFirstToolSeconds": 7.208124160766602,
+      "toFirstToolSeconds": 8.326046228408813,
+      "toolExecutionSeconds": 0.07744812965393066,
+      "toFirstAnswerSeconds": 14.726097822189331,
+      "totalSeconds": 14.733089695000672,
+      "retainedPage": true
+    },
+    {
+      "model": "chatgpt-web/gpt-6-high",
+      "case": "read",
+      "turn": "fresh",
+      "run": 1,
+      "width": 1,
+      "batch": 0,
+      "hostSetupSeconds": 0.9669756889343262,
+      "toSendAcceptedSeconds": 3.564936399459839,
+      "acceptedToFirstToolSeconds": 24.37567949295044,
+      "toFirstToolSeconds": 27.94061589241028,
+      "toolExecutionSeconds": 0.01482248306274414,
+      "toFirstAnswerSeconds": 35.36534929275513,
+      "totalSeconds": 35.3684419850033,
+      "retainedPage": false
+    },
+    {
+      "model": "chatgpt-web/gpt-6-high",
+      "case": "read",
+      "turn": "retained",
+      "run": 1,
+      "width": 1,
+      "batch": 0,
+      "hostSetupSeconds": null,
+      "toSendAcceptedSeconds": 1.095052719116211,
+      "acceptedToFirstToolSeconds": 7.1925811767578125,
+      "toFirstToolSeconds": 8.287633895874023,
+      "toolExecutionSeconds": 0.05268692970275879,
+      "toFirstAnswerSeconds": 15.048329591751099,
+      "totalSeconds": 15.05167455499759,
+      "retainedPage": true
+    },
+    {
+      "model": "chatgpt-web/gpt-6-high",
+      "case": "read",
+      "turn": "fresh",
+      "run": 2,
+      "width": 1,
+      "batch": 0,
+      "hostSetupSeconds": 0.8712022304534912,
+      "toSendAcceptedSeconds": 3.694056987762451,
+      "acceptedToFirstToolSeconds": 25.91032338142395,
+      "toFirstToolSeconds": 29.6043803691864,
+      "toolExecutionSeconds": 0.050833940505981445,
+      "toFirstAnswerSeconds": 37.09605598449707,
+      "totalSeconds": 37.1038050979987,
+      "retainedPage": false
+    },
+    {
+      "model": "chatgpt-web/gpt-6-high",
+      "case": "read",
+      "turn": "retained",
+      "run": 2,
+      "width": 1,
+      "batch": 0,
+      "hostSetupSeconds": null,
+      "toSendAcceptedSeconds": 1.0196385383605957,
+      "acceptedToFirstToolSeconds": 7.563810110092163,
+      "toFirstToolSeconds": 8.583448648452759,
+      "toolExecutionSeconds": 0.010202884674072266,
+      "toFirstAnswerSeconds": 15.064597368240356,
+      "totalSeconds": 15.069259379000869,
+      "retainedPage": true
+    },
+    {
+      "model": "chatgpt-web/gpt-6-medium",
+      "case": "read",
+      "turn": "fresh",
+      "run": 2,
+      "width": 1,
+      "batch": 0,
+      "hostSetupSeconds": 0.9137897491455078,
+      "toSendAcceptedSeconds": 3.908588171005249,
+      "acceptedToFirstToolSeconds": 25.492873907089233,
+      "toFirstToolSeconds": 29.401462078094482,
+      "toolExecutionSeconds": 0.014137029647827148,
+      "toFirstAnswerSeconds": 38.14750266075134,
+      "totalSeconds": 38.15279988799739,
+      "retainedPage": false
+    },
+    {
+      "model": "chatgpt-web/gpt-6-medium",
+      "case": "read",
+      "turn": "retained",
+      "run": 2,
+      "width": 1,
+      "batch": 0,
+      "hostSetupSeconds": null,
+      "toSendAcceptedSeconds": 1.1797466278076172,
+      "acceptedToFirstToolSeconds": 6.9095070362091064,
+      "toFirstToolSeconds": 8.089253664016724,
+      "toolExecutionSeconds": 0.012422561645507812,
+      "toFirstAnswerSeconds": 15.212677240371704,
+      "totalSeconds": 15.217191498995817,
+      "retainedPage": true
+    },
+    {
+      "model": "chatgpt-web/gpt-6-light",
+      "case": "read",
+      "turn": "fresh",
+      "run": 2,
+      "width": 1,
+      "batch": 0,
+      "hostSetupSeconds": 0.9603877067565918,
+      "toSendAcceptedSeconds": 3.885202169418335,
+      "acceptedToFirstToolSeconds": 16.00534200668335,
+      "toFirstToolSeconds": 19.890544176101685,
+      "toolExecutionSeconds": 0.08016562461853027,
+      "toFirstAnswerSeconds": 27.080016613006592,
+      "totalSeconds": 27.0900210960026,
+      "retainedPage": false
+    },
+    {
+      "model": "chatgpt-web/gpt-6-light",
+      "case": "read",
+      "turn": "retained",
+      "run": 2,
+      "width": 1,
+      "batch": 0,
+      "hostSetupSeconds": null,
+      "toSendAcceptedSeconds": 1.113675832748413,
+      "acceptedToFirstToolSeconds": 16.421927213668823,
+      "toFirstToolSeconds": 17.535603046417236,
+      "toolExecutionSeconds": 0.04070901870727539,
+      "toFirstAnswerSeconds": 24.590298652648926,
+      "totalSeconds": 24.598918613999558,
+      "retainedPage": true
+    },
+    {
+      "model": "chatgpt-web/high",
+      "case": "read",
+      "turn": "fresh",
+      "run": 2,
+      "width": 1,
+      "batch": 0,
+      "hostSetupSeconds": 0.8520462512969971,
+      "toSendAcceptedSeconds": 3.894670009613037,
+      "acceptedToFirstToolSeconds": 32.12690305709839,
+      "toFirstToolSeconds": 36.021573066711426,
+      "toolExecutionSeconds": 0.009940147399902344,
+      "toFirstAnswerSeconds": 43.982171297073364,
+      "totalSeconds": 43.986606230995676,
+      "retainedPage": false
+    },
+    {
+      "model": "chatgpt-web/high",
+      "case": "read",
+      "turn": "retained",
+      "run": 2,
+      "width": 1,
+      "batch": 0,
+      "hostSetupSeconds": null,
+      "toSendAcceptedSeconds": 1.5546209812164307,
+      "acceptedToFirstToolSeconds": 7.224457502365112,
+      "toFirstToolSeconds": 8.779078483581543,
+      "toolExecutionSeconds": 0.008298158645629883,
+      "toFirstAnswerSeconds": 15.635586738586426,
+      "totalSeconds": 15.641108777999762,
+      "retainedPage": true
+    },
+    {
+      "model": "chatgpt-web/medium",
+      "case": "read",
+      "turn": "fresh",
+      "run": 2,
+      "width": 1,
+      "batch": 0,
+      "hostSetupSeconds": 0.864926815032959,
+      "toSendAcceptedSeconds": 3.9839954376220703,
+      "acceptedToFirstToolSeconds": 16.068667888641357,
+      "toFirstToolSeconds": 20.052663326263428,
+      "toolExecutionSeconds": 0.07253909111022949,
+      "toFirstAnswerSeconds": 27.038304567337036,
+      "totalSeconds": 27.044386695000867,
+      "retainedPage": false
+    },
+    {
+      "model": "chatgpt-web/medium",
+      "case": "read",
+      "turn": "retained",
+      "run": 2,
+      "width": 1,
+      "batch": 0,
+      "hostSetupSeconds": null,
+      "toSendAcceptedSeconds": 1.2195580005645752,
+      "acceptedToFirstToolSeconds": 37.07752847671509,
+      "toFirstToolSeconds": 38.29708647727966,
+      "toolExecutionSeconds": 0.05608725547790527,
+      "toFirstAnswerSeconds": 50.13117575645447,
+      "totalSeconds": 50.136408785008825,
+      "retainedPage": true
+    },
+    {
+      "model": "chatgpt-web/light",
+      "case": "read",
+      "turn": "fresh",
+      "run": 2,
+      "width": 1,
+      "batch": 0,
+      "hostSetupSeconds": 0.8610467910766602,
+      "toSendAcceptedSeconds": 3.9345459938049316,
+      "acceptedToFirstToolSeconds": 15.932462930679321,
+      "toFirstToolSeconds": 19.867008924484253,
+      "toolExecutionSeconds": 0.06516790390014648,
+      "toFirstAnswerSeconds": 27.367299795150757,
+      "totalSeconds": 27.370151490991702,
+      "retainedPage": false
+    },
+    {
+      "model": "chatgpt-web/light",
+      "case": "read",
+      "turn": "retained",
+      "run": 2,
+      "width": 1,
+      "batch": 0,
+      "hostSetupSeconds": null,
+      "toSendAcceptedSeconds": 1.5272905826568604,
+      "acceptedToFirstToolSeconds": 7.380146265029907,
+      "toFirstToolSeconds": 8.907436847686768,
+      "toolExecutionSeconds": 0.016251325607299805,
+      "toFirstAnswerSeconds": 14.340889692306519,
+      "totalSeconds": 14.342681800990249,
+      "retainedPage": true
+    },
+    {
+      "model": "chatgpt-web/light",
+      "case": "read",
+      "turn": "fresh",
+      "run": 3,
+      "width": 1,
+      "batch": 0,
+      "hostSetupSeconds": 0.8899846076965332,
+      "toSendAcceptedSeconds": 4.069344520568848,
+      "acceptedToFirstToolSeconds": 10.781076908111572,
+      "toFirstToolSeconds": 14.85042142868042,
+      "toolExecutionSeconds": 0.016125202178955078,
+      "toFirstAnswerSeconds": 26.924166917800903,
+      "totalSeconds": 26.928625811997335,
+      "retainedPage": false
+    },
+    {
+      "model": "chatgpt-web/light",
+      "case": "read",
+      "turn": "retained",
+      "run": 3,
+      "width": 1,
+      "batch": 0,
+      "hostSetupSeconds": null,
+      "toSendAcceptedSeconds": 1.2084331512451172,
+      "acceptedToFirstToolSeconds": 9.65261960029602,
+      "toFirstToolSeconds": 10.861052751541138,
+      "toolExecutionSeconds": 0.01021885871887207,
+      "toFirstAnswerSeconds": 18.664196014404297,
+      "totalSeconds": 18.66860389400972,
+      "retainedPage": true
+    },
+    {
+      "model": "chatgpt-web/medium",
+      "case": "read",
+      "turn": "fresh",
+      "run": 3,
+      "width": 1,
+      "batch": 0,
+      "hostSetupSeconds": 0.9057233333587646,
+      "toSendAcceptedSeconds": 4.038878440856934,
+      "acceptedToFirstToolSeconds": 20.239367723464966,
+      "toFirstToolSeconds": 24.2782461643219,
+      "toolExecutionSeconds": 0.0616765022277832,
+      "toFirstAnswerSeconds": 31.509862899780273,
+      "totalSeconds": 31.513989073006087,
+      "retainedPage": false
+    },
+    {
+      "model": "chatgpt-web/medium",
+      "case": "read",
+      "turn": "retained",
+      "run": 3,
+      "width": 1,
+      "batch": 0,
+      "hostSetupSeconds": null,
+      "toSendAcceptedSeconds": 1.0355381965637207,
+      "acceptedToFirstToolSeconds": 8.344808578491211,
+      "toFirstToolSeconds": 9.380346775054932,
+      "toolExecutionSeconds": 0.13883757591247559,
+      "toFirstAnswerSeconds": 15.394057035446167,
+      "totalSeconds": 15.397978987006354,
+      "retainedPage": true
+    },
+    {
+      "model": "chatgpt-web/high",
+      "case": "read",
+      "turn": "fresh",
+      "run": 3,
+      "width": 1,
+      "batch": 0,
+      "hostSetupSeconds": 0.9802792072296143,
+      "toSendAcceptedSeconds": 4.131669759750366,
+      "acceptedToFirstToolSeconds": 17.28123116493225,
+      "toFirstToolSeconds": 21.412900924682617,
+      "toolExecutionSeconds": 0.06471872329711914,
+      "toFirstAnswerSeconds": 30.34575891494751,
+      "totalSeconds": 30.349566314995172,
+      "retainedPage": false
+    },
+    {
+      "model": "chatgpt-web/high",
+      "case": "read",
+      "turn": "retained",
+      "run": 3,
+      "width": 1,
+      "batch": 0,
+      "hostSetupSeconds": null,
+      "toSendAcceptedSeconds": 1.164914608001709,
+      "acceptedToFirstToolSeconds": 6.508530616760254,
+      "toFirstToolSeconds": 7.673445224761963,
+      "toolExecutionSeconds": 0.04610419273376465,
+      "toFirstAnswerSeconds": 14.05651569366455,
+      "totalSeconds": 14.060477729988634,
+      "retainedPage": true
+    },
+    {
+      "model": "chatgpt-web/gpt-6-light",
+      "case": "read",
+      "turn": "fresh",
+      "run": 3,
+      "width": 1,
+      "batch": 0,
+      "hostSetupSeconds": 1.008631944656372,
+      "toSendAcceptedSeconds": 5.208760738372803,
+      "acceptedToFirstToolSeconds": 13.373810052871704,
+      "toFirstToolSeconds": 18.582570791244507,
+      "toolExecutionSeconds": 0.02680492401123047,
+      "toFirstAnswerSeconds": 25.46269726753235,
+      "totalSeconds": 25.468107687003794,
+      "retainedPage": false
+    },
+    {
+      "model": "chatgpt-web/gpt-6-light",
+      "case": "read",
+      "turn": "retained",
+      "run": 3,
+      "width": 1,
+      "batch": 0,
+      "hostSetupSeconds": null,
+      "toSendAcceptedSeconds": 1.0682439804077148,
+      "acceptedToFirstToolSeconds": 7.875464200973511,
+      "toFirstToolSeconds": 8.943708181381226,
+      "toolExecutionSeconds": 0.007149219512939453,
+      "toFirstAnswerSeconds": 15.85827112197876,
+      "totalSeconds": 15.85998658099561,
+      "retainedPage": true
+    },
+    {
+      "model": "chatgpt-web/gpt-6-medium",
+      "case": "read",
+      "turn": "fresh",
+      "run": 3,
+      "width": 1,
+      "batch": 0,
+      "hostSetupSeconds": 0.914024829864502,
+      "toSendAcceptedSeconds": 3.8272058963775635,
+      "acceptedToFirstToolSeconds": 28.65946340560913,
+      "toFirstToolSeconds": 32.486669301986694,
+      "toolExecutionSeconds": 0.0091400146484375,
+      "toFirstAnswerSeconds": 40.274758100509644,
+      "totalSeconds": 40.27850239700638,
+      "retainedPage": false
+    },
+    {
+      "model": "chatgpt-web/gpt-6-medium",
+      "case": "read",
+      "turn": "retained",
+      "run": 3,
+      "width": 1,
+      "batch": 0,
+      "hostSetupSeconds": null,
+      "toSendAcceptedSeconds": 1.0149507522583008,
+      "acceptedToFirstToolSeconds": 8.077901601791382,
+      "toFirstToolSeconds": 9.092852354049683,
+      "toolExecutionSeconds": 0.06102347373962402,
+      "toFirstAnswerSeconds": 15.57943081855774,
+      "totalSeconds": 15.583662949997233,
+      "retainedPage": true
+    },
+    {
+      "model": "chatgpt-web/gpt-6-high",
+      "case": "read",
+      "turn": "fresh",
+      "run": 3,
+      "width": 1,
+      "batch": 0,
+      "hostSetupSeconds": 0.8979520797729492,
+      "toSendAcceptedSeconds": 3.899312973022461,
+      "acceptedToFirstToolSeconds": 20.851409912109375,
+      "toFirstToolSeconds": 24.750722885131836,
+      "toolExecutionSeconds": 0.051396846771240234,
+      "toFirstAnswerSeconds": 39.31214165687561,
+      "totalSeconds": 39.31703877900145,
+      "retainedPage": false
+    },
+    {
+      "model": "chatgpt-web/gpt-6-high",
+      "case": "read",
+      "turn": "retained",
+      "run": 3,
+      "width": 1,
+      "batch": 0,
+      "hostSetupSeconds": null,
+      "toSendAcceptedSeconds": 1.0282390117645264,
+      "acceptedToFirstToolSeconds": 8.600395202636719,
+      "toFirstToolSeconds": 9.628634214401245,
+      "toolExecutionSeconds": 0.00780797004699707,
+      "toFirstAnswerSeconds": 33.210702657699585,
+      "totalSeconds": 33.213352917009615,
+      "retainedPage": true
+    },
+    {
+      "model": "chatgpt-web/gpt-6-light",
+      "case": "answer",
+      "turn": "fresh",
+      "run": 1,
+      "width": 1,
+      "batch": 0,
+      "hostSetupSeconds": 0.8877737522125244,
+      "toSendAcceptedSeconds": 3.9530751705169678,
+      "acceptedToFirstToolSeconds": null,
+      "toFirstToolSeconds": null,
+      "toolExecutionSeconds": null,
+      "toFirstAnswerSeconds": 14.94112253189087,
+      "totalSeconds": 14.944206982996548,
+      "retainedPage": false
+    },
+    {
+      "model": "chatgpt-web/gpt-6-light",
+      "case": "long",
+      "turn": "fresh",
+      "run": 1,
+      "width": 1,
+      "batch": 0,
+      "hostSetupSeconds": 0.8936338424682617,
+      "toSendAcceptedSeconds": 3.7377278804779053,
+      "acceptedToFirstToolSeconds": null,
+      "toFirstToolSeconds": null,
+      "toolExecutionSeconds": null,
+      "toFirstAnswerSeconds": 10.486965417861938,
+      "totalSeconds": 10.489670214999933,
+      "retainedPage": false
+    },
+    {
+      "model": "chatgpt-web/medium",
+      "case": "answer",
+      "turn": "fresh",
+      "run": 1,
+      "width": 1,
+      "batch": 0,
+      "hostSetupSeconds": 0.8782205581665039,
+      "toSendAcceptedSeconds": 3.8543343544006348,
+      "acceptedToFirstToolSeconds": null,
+      "toFirstToolSeconds": null,
+      "toolExecutionSeconds": null,
+      "toFirstAnswerSeconds": 20.694964170455933,
+      "totalSeconds": 20.697770136001054,
+      "retainedPage": false
+    },
+    {
+      "model": "chatgpt-web/medium",
+      "case": "long",
+      "turn": "fresh",
+      "run": 1,
+      "width": 1,
+      "batch": 0,
+      "hostSetupSeconds": 0.8958268165588379,
+      "toSendAcceptedSeconds": 3.9695048332214355,
+      "acceptedToFirstToolSeconds": null,
+      "toFirstToolSeconds": null,
+      "toolExecutionSeconds": null,
+      "toFirstAnswerSeconds": 12.918527841567993,
+      "totalSeconds": 12.920573760013212,
+      "retainedPage": false
+    },
+    {
+      "model": "chatgpt-web/gpt-6-high",
+      "case": "answer",
+      "turn": "fresh",
+      "run": 1,
+      "width": 1,
+      "batch": 0,
+      "hostSetupSeconds": 0.8636713027954102,
+      "toSendAcceptedSeconds": 3.855799913406372,
+      "acceptedToFirstToolSeconds": null,
+      "toFirstToolSeconds": null,
+      "toolExecutionSeconds": null,
+      "toFirstAnswerSeconds": 13.280349016189575,
+      "totalSeconds": 13.28422929700173,
+      "retainedPage": false
+    },
+    {
+      "model": "chatgpt-web/gpt-6-high",
+      "case": "long",
+      "turn": "fresh",
+      "run": 1,
+      "width": 1,
+      "batch": 0,
+      "hostSetupSeconds": 0.883225679397583,
+      "toSendAcceptedSeconds": 3.951157808303833,
+      "acceptedToFirstToolSeconds": null,
+      "toFirstToolSeconds": null,
+      "toolExecutionSeconds": null,
+      "toFirstAnswerSeconds": 30.70086359977722,
+      "totalSeconds": 30.703005664996454,
+      "retainedPage": false
+    },
+    {
+      "model": "chatgpt-web/gpt-6-light",
+      "case": "answer",
+      "turn": "fresh",
+      "run": 2,
+      "width": 1,
+      "batch": 0,
+      "hostSetupSeconds": 0.9039576053619385,
+      "toSendAcceptedSeconds": 4.032158613204956,
+      "acceptedToFirstToolSeconds": null,
+      "toFirstToolSeconds": null,
+      "toolExecutionSeconds": null,
+      "toFirstAnswerSeconds": 16.20699143409729,
+      "totalSeconds": 16.209907928001485,
+      "retainedPage": false
+    },
+    {
+      "model": "chatgpt-web/gpt-6-light",
+      "case": "long",
+      "turn": "fresh",
+      "run": 2,
+      "width": 1,
+      "batch": 0,
+      "hostSetupSeconds": 0.8966522216796875,
+      "toSendAcceptedSeconds": 3.8902173042297363,
+      "acceptedToFirstToolSeconds": null,
+      "toFirstToolSeconds": null,
+      "toolExecutionSeconds": null,
+      "toFirstAnswerSeconds": 16.888815879821777,
+      "totalSeconds": 16.891153807999217,
+      "retainedPage": false
+    },
+    {
+      "model": "chatgpt-web/medium",
+      "case": "answer",
+      "turn": "fresh",
+      "run": 2,
+      "width": 1,
+      "batch": 0,
+      "hostSetupSeconds": 0.8719875812530518,
+      "toSendAcceptedSeconds": 4.084409236907959,
+      "acceptedToFirstToolSeconds": null,
+      "toFirstToolSeconds": null,
+      "toolExecutionSeconds": null,
+      "toFirstAnswerSeconds": 15.323775291442871,
+      "totalSeconds": 15.32649591700465,
+      "retainedPage": false
+    },
+    {
+      "model": "chatgpt-web/medium",
+      "case": "long",
+      "turn": "fresh",
+      "run": 2,
+      "width": 1,
+      "batch": 0,
+      "hostSetupSeconds": 0.8838846683502197,
+      "toSendAcceptedSeconds": 4.056878328323364,
+      "acceptedToFirstToolSeconds": null,
+      "toFirstToolSeconds": null,
+      "toolExecutionSeconds": null,
+      "toFirstAnswerSeconds": 14.078509092330933,
+      "totalSeconds": 14.081285281004966,
+      "retainedPage": false
+    },
+    {
+      "model": "chatgpt-web/gpt-6-high",
+      "case": "answer",
+      "turn": "fresh",
+      "run": 2,
+      "width": 1,
+      "batch": 0,
+      "hostSetupSeconds": 0.9608862400054932,
+      "toSendAcceptedSeconds": 3.909076452255249,
+      "acceptedToFirstToolSeconds": null,
+      "toFirstToolSeconds": null,
+      "toolExecutionSeconds": null,
+      "toFirstAnswerSeconds": 14.906514883041382,
+      "totalSeconds": 14.909494035004172,
+      "retainedPage": false
+    },
+    {
+      "model": "chatgpt-web/gpt-6-high",
+      "case": "long",
+      "turn": "fresh",
+      "run": 2,
+      "width": 1,
+      "batch": 0,
+      "hostSetupSeconds": 0.9126620292663574,
+      "toSendAcceptedSeconds": 3.802196502685547,
+      "acceptedToFirstToolSeconds": null,
+      "toFirstToolSeconds": null,
+      "toolExecutionSeconds": null,
+      "toFirstAnswerSeconds": 14.459152936935425,
+      "totalSeconds": 14.462310666000121,
+      "retainedPage": false
+    },
+    {
+      "model": "chatgpt-web/gpt-6-light",
+      "case": "answer",
+      "turn": "fresh",
+      "run": 3,
+      "width": 1,
+      "batch": 0,
+      "hostSetupSeconds": 0.9139528274536133,
+      "toSendAcceptedSeconds": 3.800352096557617,
+      "acceptedToFirstToolSeconds": null,
+      "toFirstToolSeconds": null,
+      "toolExecutionSeconds": null,
+      "toFirstAnswerSeconds": 12.920932531356812,
+      "totalSeconds": 12.923458536999533,
+      "retainedPage": false
+    },
+    {
+      "model": "chatgpt-web/gpt-6-light",
+      "case": "long",
+      "turn": "fresh",
+      "run": 3,
+      "width": 1,
+      "batch": 0,
+      "hostSetupSeconds": 0.9075636863708496,
+      "toSendAcceptedSeconds": 3.7691121101379395,
+      "acceptedToFirstToolSeconds": null,
+      "toFirstToolSeconds": null,
+      "toolExecutionSeconds": null,
+      "toFirstAnswerSeconds": 16.925976991653442,
+      "totalSeconds": 16.92932141700294,
+      "retainedPage": false
+    },
+    {
+      "model": "chatgpt-web/medium",
+      "case": "answer",
+      "turn": "fresh",
+      "run": 3,
+      "width": 1,
+      "batch": 0,
+      "hostSetupSeconds": 0.9034073352813721,
+      "toSendAcceptedSeconds": 4.012543439865112,
+      "acceptedToFirstToolSeconds": null,
+      "toFirstToolSeconds": null,
+      "toolExecutionSeconds": null,
+      "toFirstAnswerSeconds": 15.069024801254272,
+      "totalSeconds": 15.071631667000474,
+      "retainedPage": false
+    },
+    {
+      "model": "chatgpt-web/medium",
+      "case": "long",
+      "turn": "fresh",
+      "run": 3,
+      "width": 1,
+      "batch": 0,
+      "hostSetupSeconds": 0.9079093933105469,
+      "toSendAcceptedSeconds": 3.9651737213134766,
+      "acceptedToFirstToolSeconds": null,
+      "toFirstToolSeconds": null,
+      "toolExecutionSeconds": null,
+      "toFirstAnswerSeconds": 14.932084798812866,
+      "totalSeconds": 14.936008666001726,
+      "retainedPage": false
+    },
+    {
+      "model": "chatgpt-web/gpt-6-high",
+      "case": "answer",
+      "turn": "fresh",
+      "run": 3,
+      "width": 1,
+      "batch": 0,
+      "hostSetupSeconds": 0.8788936138153076,
+      "toSendAcceptedSeconds": 6.8283960819244385,
+      "acceptedToFirstToolSeconds": null,
+      "toFirstToolSeconds": null,
+      "toolExecutionSeconds": null,
+      "toFirstAnswerSeconds": 16.675437927246094,
+      "totalSeconds": 16.677193730007275,
+      "retainedPage": false
+    },
+    {
+      "model": "chatgpt-web/gpt-6-high",
+      "case": "long",
+      "turn": "fresh",
+      "run": 3,
+      "width": 1,
+      "batch": 0,
+      "hostSetupSeconds": 0.9412035942077637,
+      "toSendAcceptedSeconds": 3.791445732116699,
+      "acceptedToFirstToolSeconds": null,
+      "toFirstToolSeconds": null,
+      "toolExecutionSeconds": null,
+      "toFirstAnswerSeconds": 14.974920272827148,
+      "totalSeconds": 14.977897814998869,
+      "retainedPage": false
+    }
+  ]
+}

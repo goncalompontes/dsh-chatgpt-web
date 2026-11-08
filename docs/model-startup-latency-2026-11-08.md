@@ -1,5 +1,8 @@
 # ChatGPT Web startup latency — 2026-11-08
 
+> Follow-up: the [latency matrix](model-latency-matrix-2026-11-08.md) repeats the
+> measurement with three runs, three prompt shapes and a concurrency arm (71 turns).
+
 The dominant measured interval is **after ChatGPT accepts the prompt and before
 its native tool request arrives**. Browser preparation explains a smaller part of
 the first-message delay. The run also exposed a visibility gap: none of the 24

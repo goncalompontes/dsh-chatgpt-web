@@ -7,6 +7,7 @@ storageState.json
 storageState.*.json
 .dsh/
 *.tsbuildinfo
+__pycache__/
 launcher/
 graphify-out/
 *.tgz
