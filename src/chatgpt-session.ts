@@ -127,40 +127,51 @@ export async function activateChatGptEffortMenu(
   control: Locator,
   options: { settleMs?: number } = {},
 ): Promise<ChatGptEffortActivation> {
-  const openSurface = await visibleEffortSurface(page, control);
-  if (openSurface) return { method: "already-open", ...openSurface };
-
   const settleMs = options.settleMs ?? 3_000;
-  await clearGhostEffortState(page, control);
+  let lastError: unknown;
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    try {
+      const openSurface = await visibleEffortSurface(page, control);
+      if (openSurface) return { method: "already-open", ...openSurface };
+      await clearGhostEffortState(page, control);
 
-  // Prefer a semantic keyboard activation before any pointer input: pointer coordinates break
-  // easily when ChatGPT overlays or re-renders the composer mid-turn.
-  const keyboardFocused = await control.focus().then(
-    () => control.evaluate(element => element === document.activeElement).catch(() => false),
-    () => false,
-  );
-  if (keyboardFocused) {
-    await control.press("Enter").catch(() => {});
-    const keyboardSurface = await waitForEffortSurface(page, control, settleMs);
-    if (keyboardSurface) return { method: "keyboard", ...keyboardSurface };
+      // Prefer a semantic keyboard activation before any pointer input: pointer coordinates break
+      // easily when ChatGPT overlays or re-renders the composer mid-turn.
+      const keyboardFocused = await control.focus().then(
+        () => control.evaluate(element => element === document.activeElement).catch(() => false),
+        () => false,
+      );
+      if (keyboardFocused) {
+        await control.press("Enter").catch(() => {});
+        const keyboardSurface = await waitForEffortSurface(page, control, settleMs);
+        if (keyboardSurface) return { method: "keyboard", ...keyboardSurface };
+        await clearGhostEffortState(page, control);
+      }
+
+      await control.click({ force: true, timeout: Math.max(1, settleMs) });
+      const clickedSurface = await waitForEffortSurface(page, control, settleMs);
+      if (clickedSurface) return { method: "click", ...clickedSurface };
+
+      await clearGhostEffortState(page, control);
+      await control.dispatchEvent("pointerdown", {
+        button: 0,
+        buttons: 1,
+        pointerType: "mouse",
+        isPrimary: true,
+      });
+      const pointerSurface = await waitForEffortSurface(page, control, settleMs);
+      if (pointerSurface) return { method: "pointerdown", ...pointerSurface };
+    } catch (error) {
+      lastError = error;
+    }
     await clearGhostEffortState(page, control);
+    if (attempt < 2) {
+      await new Promise(resolveSleep => setTimeout(resolveSleep, 250));
+    }
   }
-
-  await control.click({ force: true, timeout: Math.max(1, settleMs) });
-  const clickedSurface = await waitForEffortSurface(page, control, settleMs);
-  if (clickedSurface) return { method: "click", ...clickedSurface };
-
-  await clearGhostEffortState(page, control);
-  await control.dispatchEvent("pointerdown", {
-    button: 0,
-    buttons: 1,
-    pointerType: "mouse",
-    isPrimary: true,
-  });
-  const pointerSurface = await waitForEffortSurface(page, control, settleMs);
-  if (pointerSurface) return { method: "pointerdown", ...pointerSurface };
   throw new Error(
-    "ChatGPT effort control did not expose its owned menu or structural slider after click and primary pointerdown",
+    "ChatGPT effort control did not expose its owned menu or structural slider after three activation attempts",
+    { cause: lastError },
   );
 }
 

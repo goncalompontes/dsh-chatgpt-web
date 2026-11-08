@@ -78,3 +78,17 @@ Source inspection identified an additional deterministic cleanup defect: `ChatGp
 ## Nested-pipe continuation identity collision
 
 Follow-up inspection identified a deterministic result misrouting defect in `outstandingChatGptToolCallId()`: when outstanding calls include both `call_a` and `call_a|exact`, the DSH/pi-ai continuation ID `call_a|exact|provider` was normalized to `call_a` rather than `call_a|exact`. The regression in `tests/continuation-lifecycle.test.ts` failed with the wrong call ID before correction and passes afterward. The matcher now checks exact IDs first and otherwise selects the longest outstanding pipe-delimited prefix. Both ordinary continuation and compaction handoff use this shared matcher. Local verification: **110 passed, 0 failed, 608 assertions across 22 files**; TypeScript typecheck and `git diff --check` passed. This addresses deterministic routing only; ambiguous broker acknowledgement and live tool execution remain unverified, and no side-effecting tool was replayed.
+# Follow-up: concurrent effort-picker failures (2026-11-08)
+
+An eight-client queued admission run exposed a repeatable upstream failure under
+load: three clients received `ChatGPT effort control did not expose its owned menu
+or structural slider after click and primary pointerdown`. The sidecar remained
+healthy, capped active browser turns at five, and drained the queue. The failure
+occurred during independent page effort-control setup, before tool execution.
+
+`activateChatGptEffortMenu` now retries the semantic keyboard/click/pointerdown
+activation sequence up to three times, clearing ghost picker state between
+attempts. The retry is bounded and does not replay a submitted prompt or tool
+call. The admission smoke accepts a configurable client count so the workload is
+reproducible (`--clients 8`). A subsequent rerun is required after deployment to
+measure whether the retry removes this load-sensitive failure.
