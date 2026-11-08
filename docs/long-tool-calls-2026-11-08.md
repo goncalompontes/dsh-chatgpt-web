@@ -110,14 +110,21 @@ command completed; the concurrent long calls were unaffected. Evidence:
 `/tmp/dsh-long-tools-cancel-live.log`.
 
 
-## Remaining runtime check
+## Final runtime validation
 
-The final detailed-reminder fix passes the full suite, typecheck, build and
-clean-package smoke, but its live 180-second background rerun is still pending.
-An unrelated DSH ACP session began another browser turn while the final build
-was being checked. A pre-restart health guard refused the restart before draining
-or shutting down anything. The running sidecar therefore has the ten-minute
-foreground policy and gentle-reminder fix; the detailed-reminder fix awaits an
-idle restart. No claim is made that the long-background scenario passes yet.
+The unrelated ACP turn finished naturally. With zero active HTTP/browser turns
+and no pending admission requests, authenticated drain/shutdown reloaded the
+sidecar as PID 2691136. Gateway PID 2628246 and router PID 1359 remain healthy.
+
+The final 180-second background run passed: exactly one background bash,
+a concurrent README read, five job-output calls with 30-second budgets, actual
+`DSH_BACKGROUND_OK` collected in completed native tool output, and the final
+answer marker. Native history confirms both `job_output × 3` and
+`job_output × 5` reminders were delivered without changing execution ownership.
+Evidence: `/tmp/dsh-long-background-final.log`,
+`/tmp/dsh-acp-updates-cicko4bc.jsonl`, native session
+`9fc086f1-30ee-4f0c-a1d4-8d0e8bf1a347`. The smoke process exited 0 and closed
+its session. Final health showed zero active HTTP/browser turns and no queued
+admissions. All timeout changes and both reminder fixes are now deployed.
 
 Final built CLI SHA-256: `fe5eba2d46ee0460eeb9673e9ad68a9054e3329fd7311c1143dad9a44204b023`.
