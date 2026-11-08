@@ -4,6 +4,7 @@ import {
   estimateBrowserCapacity,
   DEFAULT_BROWSER_CAPACITY_LIMITS,
 } from "../src/adapters/chatgpt-web/browser-capacity";
+import { browserTurnCeiling, MAX_CHATGPT_BROWSER_TABS } from "../src/adapters/chatgpt-web/concurrency";
 
 const GiB = 1024 ** 3;
 const sample = (memoryGiB: number, load = 1, cpus = 16) =>
@@ -11,7 +12,21 @@ const sample = (memoryGiB: number, load = 1, cpus = 16) =>
 
 describe("resource-aware browser capacity", () => {
   test("never exceeds the separately enforced physical limit", () => {
-    expect(estimateBrowserCapacity(sample(128, 0, 64))).toBe(5);
+    expect(estimateBrowserCapacity(sample(1024, 0, 256))).toBe(MAX_CHATGPT_BROWSER_TABS);
+  });
+
+  test("supports more than five turns with observed workload costs and headroom", () => {
+    const measured = { ...sample(20, 4, 32), turnRssBytes: 2 * GiB, turnCpuCores: 0.5,
+      workloadMemoryBytes: 8 * GiB, workloadCpuCores: 2 };
+    expect(estimateBrowserCapacity(measured)).toBe(12);
+    expect(estimateBrowserCapacity({ ...measured, availableMemoryBytes: 0 })).toBe(2);
+    expect(estimateBrowserCapacity({ ...measured, loadAverageOneMinute: 30 })).toBe(1);
+    expect(estimateBrowserCapacity(measured, { ...DEFAULT_BROWSER_CAPACITY_LIMITS, max: 7 })).toBe(7);
+  });
+
+  test("validates the shared configurable physical ceiling", () => {
+    expect(browserTurnCeiling('12')).toBe(12);
+    for (const value of ['0', '-1', '129', 'Infinity', '4.5', '']) expect(() => browserTurnCeiling(value)).toThrow();
   });
 
   test("conservatively clamps under memory or CPU pressure", () => {

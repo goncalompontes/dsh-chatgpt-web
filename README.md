@@ -60,6 +60,31 @@ Small conversational web models (like GPT-6 Luna) excel at explanations, dialogu
 - **DeepSeek Harness:** `>=0.2.0-rc.2`.
 - **Browser:** Chrome or Chromium on your machine (used for the one-time sign-in and for serving).
 
+### Automatic turn concurrency
+
+On Linux (including WSL2), the provider samples host memory/CPU pressure and its
+own browser process tree every 10 seconds while work is active or queued. After
+a 20-second warm-up at a stable number of active turns, it learns incremental
+RAM and CPU costs per turn, adds 25% headroom, and retains recent workload peaks.
+Idle retained pages remain part of the memory baseline, rather than being counted
+as free capacity. When turns finish, their retained pages are excluded from learning
+the cost of the remaining turns.
+
+Capacity starts at one, rises by one after three healthy samples and at least
+30 seconds between increases, and drops immediately when pressure increases.
+Running turns finish normally; additional turns wait in a FIFO queue (up to 256).
+The policy reserves 4 GiB of memory and 25% of CPU capacity for other work. Until
+measurements are available, each turn is budgeted at 3 GiB and one CPU core.
+
+The default ceiling is **32 simultaneous browser turns**, replacing the previous
+five-turn limit. This is a ceiling, not a target: actual concurrency depends on
+observed resources. Set `DSH_CHATGPT_WEB_MAX_TURNS` to an integer from 1 to 128 in
+the sidecar's launch environment to override it, then restart the sidecar when
+idle. The same ceiling applies to admission and physical browser workers.
+Unavailable host metrics reduce admission to one. `/healthz` exposes current
+capacity, queue depth, maximum capacity, and the last resource measurements under
+`browser_admission`.
+
 ---
 
 ## Quick Start

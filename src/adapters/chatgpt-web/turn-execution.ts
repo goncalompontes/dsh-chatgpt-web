@@ -12,7 +12,7 @@ import { MAX_CHATGPT_BROWSER_TABS } from "./concurrency";
 import { ChatGptBrowserAdmission } from "./browser-admission";
 import { BrowserAdmissionCapacityMonitor } from "./browser-capacity-monitor";
 import { BrowserCapacityController, type BrowserCapacitySample } from "./browser-capacity";
-import { sampleLinuxBrowserResources } from "./browser-resources";
+import { BrowserWorkloadSampler } from "./browser-workload";
 import type { ChatGptExternalTurnProgress } from "./turn-progress";
 
 function awaitWithAbort<T>(promise: Promise<T>, signal?: AbortSignal): Promise<T> {
@@ -521,11 +521,11 @@ export class ChatGptTurnSessions {
   constructor(
     private readonly ttlMs = 30 * 60_000,
     private readonly maxEntries = 256,
-    adaptiveSample?: () => BrowserCapacitySample | null,
+    adaptiveSample?: (active: number) => BrowserCapacitySample | null,
   ) {
     if (adaptiveSample) {
       this.capacityMonitor = new BrowserAdmissionCapacityMonitor(
-        this.admission, new BrowserCapacityController(), adaptiveSample,
+        this.admission, new BrowserCapacityController(), () => adaptiveSample(this.admission.snapshot().active),
       );
     }
   }
@@ -871,7 +871,8 @@ export class ChatGptTurnSessions {
   }
 
   admissionMetrics() {
-    return this.admission.metrics();
+    return { ...this.admission.metrics(), maxCapacity: MAX_CHATGPT_BROWSER_TABS,
+      resources: this.capacityMonitor?.resources() ?? null };
   }
 
   private prune(): void {
@@ -937,5 +938,6 @@ export class ChatGptTurnSessions {
 }
 
 // Keep tests and auxiliary registries deterministic; only the production singleton
-// samples host pressure. The worker still independently enforces its five-run cap.
-export const chatGptTurnSessions = new ChatGptTurnSessions(undefined, undefined, sampleLinuxBrowserResources);
+// samples host pressure. Workers independently enforce the shared configured ceiling.
+const browserWorkloadSampler = new BrowserWorkloadSampler();
+export const chatGptTurnSessions = new ChatGptTurnSessions(undefined, undefined, active => browserWorkloadSampler.sample(active));

@@ -8,6 +8,7 @@ import { BrowserCapacityController, type BrowserCapacitySample } from "./browser
  */
 export class BrowserAdmissionCapacityMonitor {
   private timer: ReturnType<typeof setInterval> | undefined;
+  private latestSample: BrowserCapacitySample | null = null;
 
   constructor(
     private readonly admission: ChatGptBrowserAdmission,
@@ -29,10 +30,13 @@ export class BrowserAdmissionCapacityMonitor {
     } catch {
       sample = null;
     }
+    this.latestSample = sample;
     const capacity = this.controller.update(sample, this.clock());
     this.admission.setCapacity(capacity);
     return capacity;
   }
+
+  resources(): BrowserCapacitySample | null { return this.latestSample; }
 
   /** Start observing lazily; a queued request can gain capacity on future samples. */
   start(): void {

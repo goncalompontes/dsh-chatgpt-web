@@ -171,7 +171,7 @@ async def main(args):
         else:
             # Give native summarization enough compressible history to satisfy its
             # strict smaller-than-source requirement before testing checkpoint recovery.
-            command = ("sleep 30; printf DSH_ACP_OK" if args.scenario == "load" else
+            command = (f"sleep {args.load_seconds}; printf DSH_ACP_OK" if args.scenario == "load" else
                        "printf 'DSH_COMPACTION_SEED_%04d\\n' {1..128}; printf DSH_ACP_OK"
                        if args.scenario in ("compact", "compact-active") else "printf DSH_ACP_OK")
             await prompt(
@@ -300,5 +300,9 @@ if __name__ == "__main__":
     parser.add_argument("--model", default="chatgpt-web/gpt-6-light")
     parser.add_argument("--scenario", choices=("tool", "load", "background", "resume", "reconnect", "cancel", "parallel", "parallel-batch", "mixed-failure", "compact", "compact-active", "native-failure"), default="tool")
     parser.add_argument("--timeout", type=float, default=180)
+    parser.add_argument("--load-seconds", type=int, default=30)
     parser.add_argument("--capture-updates", action="store_true", help="Retain private ACP update JSONL for consumer compatibility probes")
-    asyncio.run(main(parser.parse_args()))
+    args = parser.parse_args()
+    if not 1 <= args.load_seconds <= 300:
+        parser.error("--load-seconds must be between 1 and 300")
+    asyncio.run(main(args))

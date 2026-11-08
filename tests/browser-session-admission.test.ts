@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { MAX_CHATGPT_BROWSER_TABS } from "../src/adapters/chatgpt-web/concurrency";
 import {
   ChatGptTextFeed, ChatGptTraceFeed, ChatGptTurnSessions,
   type ChatGptTurnRuntime,
@@ -102,24 +103,25 @@ describe("native session admission", () => {
     other.runtime.cancel();
   });
 
-  test("queues a sixth owner without creating a browser until physical settlement", async () => {
+  test("queues beyond the configured ceiling until physical settlement", async () => {
     const sessions = new ChatGptTurnSessions();
     const runtimes: ReturnType<typeof mockRuntime>[] = [];
     const start = () => { const r = mockRuntime(); runtimes.push(r); return r.runtime; };
-    const first = await Promise.all(Array.from({ length: 5 }, (_, i) =>
+    const limit = MAX_CHATGPT_BROWSER_TABS;
+    const first = await Promise.all(Array.from({ length: limit }, (_, i) =>
       sessions.getOrCreateAfterOwnerRetirement(`key-${i}`, `owner-${i}`, start)));
-    expect(first).toHaveLength(5);
-    expect(runtimes).toHaveLength(5);
-    const sixth = sessions.getOrCreateAfterOwnerRetirement("key-5", "owner-5", start);
+    expect(first).toHaveLength(limit);
+    expect(runtimes).toHaveLength(limit);
+    const queued = sessions.getOrCreateAfterOwnerRetirement(`key-${limit}`, `owner-${limit}`, start);
     await microtasks();
-    expect(runtimes).toHaveLength(5);
+    expect(runtimes).toHaveLength(limit);
     runtimes[0]!.browser.resolve("done");
     await microtasks();
-    expect(runtimes).toHaveLength(5);
+    expect(runtimes).toHaveLength(limit);
     runtimes[0]!.physical.resolve();
-    const admitted = await sixth;
-    expect(admitted.ownerKey).toBe("owner-5");
-    expect(runtimes).toHaveLength(6);
+    const admitted = await queued;
+    expect(admitted.ownerKey).toBe(`owner-${limit}`);
+    expect(runtimes).toHaveLength(limit + 1);
     for (const r of runtimes) { r.browser.resolve("done"); r.physical.resolve(); }
   });
 
@@ -180,14 +182,14 @@ describe("native session admission", () => {
     const sessions = new ChatGptTurnSessions();
     const runtimes: ReturnType<typeof mockRuntime>[] = [];
     const start = () => { const r = mockRuntime(); runtimes.push(r); return r.runtime; };
-    await Promise.all(Array.from({ length: 5 }, (_, i) =>
+    await Promise.all(Array.from({ length: MAX_CHATGPT_BROWSER_TABS }, (_, i) =>
       sessions.getOrCreateAfterOwnerRetirement(`key-${i}`, `owner-${i}`, start)));
     const controller = new AbortController();
     const blocked = sessions.getOrCreateAfterOwnerRetirement("blocked", "other", start, undefined, controller.signal);
     await microtasks();
     controller.abort();
     expect(blocked).rejects.toHaveProperty("name", "AbortError");
-    expect(runtimes).toHaveLength(5);
+    expect(runtimes).toHaveLength(MAX_CHATGPT_BROWSER_TABS);
     for (const r of runtimes) { r.browser.resolve("done"); r.physical.resolve(); }
   });
 });

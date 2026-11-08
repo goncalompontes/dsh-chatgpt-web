@@ -1,3 +1,5 @@
+import { MAX_CHATGPT_BROWSER_TABS } from "./concurrency";
+
 /** Pure, conservative resource-bound capacity estimator. No browser lifecycle side effects. */
 export interface BrowserCapacitySample {
   availableMemoryBytes: number;
@@ -5,6 +7,12 @@ export interface BrowserCapacitySample {
   loadAverageOneMinute: number;
   /** Optional measured per-active-turn browser/launcher incremental RSS. */
   turnRssBytes?: number;
+  turnCpuCores?: number;
+  /** Resources already occupied by this sidecar's browser process tree. */
+  workloadMemoryBytes?: number;
+  workloadCpuCores?: number;
+  browserTreeRssBytes?: number;
+  activeTurns?: number;
 }
 
 export interface BrowserCapacityLimits {
@@ -18,10 +26,9 @@ export interface BrowserCapacityLimits {
 
 export const DEFAULT_BROWSER_CAPACITY_LIMITS: BrowserCapacityLimits = {
   min: 1,
-  max: 5, // Keep the current independently enforced browser-worker limit until validated.
+  max: MAX_CHATGPT_BROWSER_TABS,
   memoryReserveBytes: 4 * 1024 ** 3,
-  // Live ACP smoke: ~1.9 GiB for one active browser tree and ~2.5 GiB with
-  // retained conversations. Use a conservative allowance pending peak-load calibration.
+  // Cold-start allowance until sustained live work supplies measured costs.
   defaultTurnRssBytes: 3 * 1024 ** 3,
   cpuHeadroomFraction: 0.75,
 };
@@ -46,14 +53,22 @@ export function estimateBrowserCapacity(
   }
 
   const rss = sample.turnRssBytes && Number.isFinite(sample.turnRssBytes) && sample.turnRssBytes > 0
-    ? Math.max(sample.turnRssBytes, limits.defaultTurnRssBytes / 2)
+    ? Math.max(sample.turnRssBytes, 512 * 1024 ** 2)
     : limits.defaultTurnRssBytes;
-  const memoryBudget = Math.max(0, sample.availableMemoryBytes - limits.memoryReserveBytes);
+  const ownMemory = Number.isFinite(sample.workloadMemoryBytes) && sample.workloadMemoryBytes! > 0
+    ? sample.workloadMemoryBytes! : 0;
+  const ownCpu = Number.isFinite(sample.workloadCpuCores) && sample.workloadCpuCores! > 0
+    ? Math.min(sample.workloadCpuCores!, sample.loadAverageOneMinute) : 0;
+  const turnCpu = Number.isFinite(sample.turnCpuCores) && sample.turnCpuCores! > 0
+    ? Math.max(0.5, sample.turnCpuCores!) : 1;
+  // Availability already excludes running browsers. Credit only their observed
+  // usage, rather than counting the current workload twice or inventing headroom.
+  const memoryBudget = Math.max(0, sample.availableMemoryBytes - limits.memoryReserveBytes + ownMemory);
   const memorySlots = Math.floor(memoryBudget / rss);
-  const cpuBudget = Math.max(0, sample.cpuCount * limits.cpuHeadroomFraction - sample.loadAverageOneMinute);
-  // Every turn gets at least one CPU-equivalent of remaining headroom. Host load is
-  // an imperfect pressure signal; it must not expand capacity beyond the hard maximum.
-  const cpuSlots = Math.floor(cpuBudget);
+  const cpuBudget = Math.max(0, sample.cpuCount * limits.cpuHeadroomFraction - sample.loadAverageOneMinute + ownCpu);
+  // Host load is an imperfect pressure signal; measured per-turn CPU retains
+  // a half-core floor and never expands capacity beyond the shared ceiling.
+  const cpuSlots = Math.floor(cpuBudget / turnCpu);
   return Math.max(limits.min, Math.min(limits.max, memorySlots, cpuSlots));
 }
 
