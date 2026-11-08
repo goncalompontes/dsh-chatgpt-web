@@ -83,6 +83,11 @@ async def main(args):
         assert required <= {u.get("title") for u in completed}, completed
         if args.scenario == "parallel-batch":
             assert sum(u.get("title") == "read" for u in completed) >= 2, completed
+            starts = [index for index, update in enumerate(turn)
+                      if update.get("sessionUpdate") == "tool_call" and update.get("title") == "read"]
+            terminals = [index for index, update in enumerate(turn)
+                         if update.get("sessionUpdate") == "tool_call_update" and update.get("title") == "read"]
+            assert len(starts) >= 2 and len(terminals) >= 2 and max(starts[:2]) < min(terminals[:2]), turn
         for update in terminal:
             original = started[update["toolCallId"]]
             assert update.get("title") == original["title"], update

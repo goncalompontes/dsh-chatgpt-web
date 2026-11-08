@@ -1,8 +1,7 @@
 # Installed T3 consumer and media follow-up
 
 This extends `acp-live-validation-2026-11-08.md`. The overall reliability goal
-remains active; direct rendered T3 UI confirmation and live overlapping reads
-remain unverified.
+remains active; direct rendered T3 UI confirmation remains unverified.
 
 ## Actual T3 consumer behavior
 
@@ -85,7 +84,11 @@ Evidence is `/tmp/dsh-live-image-export.log`.
 Evidence is `/tmp/dsh-live-chart-export.log`. This proves browser-generated PNG
 download bytes. It does not prove a live authenticated inline-image fetch; the
 saved file came through the download stream. The authenticated image-fetch path
-remains covered by Chromium fixtures.
+remains covered by Chromium fixtures. A fresh live chart run
+(`media-smoke-3c9fc582-a9f5-4455-aa68-68d93f970e02`) exported a 1,601-byte PNG at
+`~/.dsh/storages/chatgpt-web/artifacts/181f00ad-db11-4731-8c94-8c478898bf9b-blue_circle.png`;
+the provider still presents this artifact through its download control, so the
+inline authenticated path remains unverified.
 
 ## Concurrency evidence limits
 
@@ -103,8 +106,11 @@ The maintained `parallel` smoke uses independent reads and requires observed ACP
 overlap. It reports a missing observation without assuming which layer caused it;
 captured updates and broker delivery logs distinguish model dispatch from native
 scheduling. Real-socket broker tests still establish concurrent invocation,
-distinct names/IDs and mixed out-of-order results. A live overlapping-read run
-through the model remains open.
+distinct names/IDs and mixed out-of-order results. The supported live batch path
+is now also verified: session `1e8fe59b-6155-4ecb-b2d6-e60a6584dedf` dispatched two
+independent `read` calls, emitted both `tool_call` starts before either terminal
+update, and completed both with native `read` labels. The smoke asserts that
+ordering in the captured ACP stream.
 
 ## Validation
 
