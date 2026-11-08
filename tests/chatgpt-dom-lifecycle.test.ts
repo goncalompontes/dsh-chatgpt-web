@@ -2,9 +2,35 @@ import { expect, test } from "bun:test";
 import { existsSync } from "node:fs";
 import { chromium } from "playwright-core";
 import { ChatGptBrowserWorker, chatGptTurnLocator, throwIfChatGptSubmissionErrorAlert } from "../src/adapters/chatgpt-web/browser-worker";
+import { activateChatGptEffortMenu } from "../src/chatgpt-session";
 
 const executablePath = process.env.CHROME_EXECUTABLE_PATH ?? "/usr/bin/google-chrome-stable";
 const browserTest = existsSync(executablePath) ? test : test.skip;
+
+browserTest("effort activation recovers when picker handlers hydrate after the first activation cycle", async () => {
+  const browser = await chromium.launch({ executablePath, headless: true });
+  try {
+    const page = await browser.newPage();
+    await page.setContent(`<button id="control" aria-controls="picker" aria-expanded="false">Model</button>
+      <div id="picker" role="menu" hidden><span role="menuitemradio">GPT-6</span></div>
+      <script>
+        const control = document.getElementById('control');
+        let hydrated = false;
+        control.addEventListener('pointerdown', () => { hydrated = true; });
+        control.addEventListener('keydown', event => {
+          if (event.key === 'Enter' && hydrated) {
+            document.getElementById('picker').hidden = false;
+            control.setAttribute('aria-expanded', 'true');
+          }
+        });
+      </script>`);
+    const activation = await activateChatGptEffortMenu(page, page.locator('#control'), { settleMs: 50 });
+    expect(activation.method).toBe('keyboard');
+    expect(await activation.menu.isVisible()).toBe(true);
+  } finally {
+    await browser.close();
+  }
+});
 
 browserTest("image-only and labelled canvas answers survive DOM extraction and completion checks", async () => {
   const browser = await chromium.launch({ executablePath, headless: true });

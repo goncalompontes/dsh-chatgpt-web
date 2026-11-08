@@ -94,5 +94,39 @@ reproducible (`--clients 8`). After deployment, the repeated eight-client run ha
 no effort-picker failures; seven clients completed and one exceeded the smoke
 client's 300-second end-to-end timeout after a 166-second admission wait and a
 later response-stall retry. The sidecar remained healthy, capped active turns at
-four, and drained all seven pending requests. This separates the fixed picker
-race from a remaining queue/client-timeout budget under heavier load.
+four, and drained all seven pending requests. This run alone does not isolate the
+timeout's cause: its budget includes admission, browser setup, connector wait,
+tool execution and response completion.
+
+## Shared persistent connector coupling
+
+A subsequent eight-client run with a 600-second client budget still failed:
+two model responses reported `persistent MCP connection closed`, and one client
+timed out. Source inspection of the installed local-shell MCP manager showed
+that `_PersistentConnection._serve` serializes all tool calls through one queue.
+The per-call timeout includes time in that queue; a timeout closes the shared
+connection and rejects the other queued clients. DSH uses a separate turn broker
+for session state, so this process persistence adds cross-client coupling without
+being necessary for DSH continuity.
+
+The live `dsh` registry was changed through `manage(action='unpersist', name='dsh')`
+to use an independent stdio transport per invocation. The gateway and sidecar
+were already stopped by the supervisor after an idle window with no clients;
+`stack.py ensure` then started fresh workers with the new configuration. No
+active user session was interrupted. A staged HTTP idle-timeout increase was
+reverted: idle-termination log lines do not establish the shared-worker failure.
+Do not restore `persistent=true` for this stateless broker connector. The stack
+installer was also corrected in `dsh-web-stack` commit `fee25a5` so new
+registrations use independent transports. Existing registries are intentionally
+not overwritten by the installer; they require the explicit `unpersist` action.
+
+The rerun passed **all eight clients**. Evidence is
+`/tmp/dsh-admission-load-khsyoo0c/` (per-client logs and 99 resource samples).
+Adaptive capacity grew from one to five; observed active turns peaked at four,
+pending admissions peaked at seven, sidecar-descendant summed RSS peaked at
+4,573,265,920 bytes (4.26 GiB), and maximum admission wait was 139,805 ms. All
+eight native bash calls and final markers completed. This validates queued
+multi-client tool round trips with independent transports, not large-document
+or image-generation memory costs. Keep the five-turn cap, 4 GiB reserve and
+3 GiB per-turn allowance. The browser regression for delayed picker hydration
+passes; final local suite: 133 tests, 0 failures, 989 assertions, plus typecheck.
