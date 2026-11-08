@@ -114,11 +114,18 @@ Rendered T3 file-card verification passed in the user-authorized temporary
 thread; see `acp-consumer-validation-2026-11-08.md` for the exact labels and screenshot.
 The concurrent longer document and PNG workload also passed; see
 `browser-mixed-workload-2026-11-08.md` for response sizes, RSS and validation limits.
+`rich-widget-fallback-2026-11-08.md` records a subsequent correction for ordinary
+roadmap prose being misclassified as a map and silently discarded embedded frames.
 
 ## Still required for the full goal
 
-- Authenticated generated-image live export and fuller interactive-widget handling.
-  Actual generated CSV bytes now pass the live check; Chromium image fixtures pass.
+- Investigate the newly observed hydration/rebind rejection after a completed tool
+  in trace `b7d68fc64b19`; see `rich-widget-fallback-2026-11-08.md`. New bounded
+  diagnostics retain mismatch sizes without prompt contents. Do not replay the tool.
+- Authenticated generated-image live export remains unverified. Actual generated
+  CSV/PNG downloads and Chromium authenticated-image fixtures pass. Embedded-frame
+  notices, semantic map summaries and labelled canvas/SVG snapshots are implemented;
+  live upstream frame/canvas emission remains unobserved.
 - Resource workloads involving large input documents, native image generation,
   or saturated mixed work remain unmeasured. Eight-client queued tool admission
   and a concurrent longer output document plus PNG export now pass.

@@ -52,6 +52,31 @@ browserTest("image-only and labelled canvas answers survive DOM extraction and c
   }
 });
 
+browserTest("iframe-only answers and roadmap prose survive the browser-to-Markdown pipeline", async () => {
+  const browser = await chromium.launch({ executablePath, headless: true });
+  try {
+    const context = await browser.newContext();
+    await context.addInitScript("globalThis.__name = value => value");
+    const page = await context.newPage();
+    const worker: any = Object.create(ChatGptBrowserWorker.prototype);
+    await page.setContent('<main><section id="turn"><div class="markdown"><iframe title="Revenue explorer"></iframe></div></section><button data-testid="copy-turn-action-button">Copy</button></main>');
+    const cache = {};
+    const frame = await worker.responseDomSnapshot(page.locator('#turn'), cache);
+    expect(frame.visibleText).toContain('Revenue explorer (interactive content available in ChatGPT)');
+    expect(frame.markdownSegments.map((segment: any) => segment.html).join('')).toContain('Revenue explorer');
+    expect(frame.completionActionVisible).toBe(true);
+    await page.locator('iframe').evaluate(node => node.setAttribute('title', 'Updated explorer'));
+    const updated = await worker.responseDomSnapshot(page.locator('#turn'), cache);
+    expect(updated.visibleText).toContain('Updated explorer');
+    await page.setContent('<main><section id="turn"><div class="markdown"><section aria-label="Roadmap" class="roadmap-container"><p>Keep the entire plan.</p></section></div></section></main>');
+    const roadmap = await worker.responseDomSnapshot(page.locator('#turn'), {});
+    expect(roadmap.visibleText).toContain('Keep the entire plan.');
+    expect(roadmap.markdownSegments.map((segment: any) => segment.html).join('')).toContain('Keep the entire plan.');
+  } finally {
+    await browser.close();
+  }
+});
+
 browserTest("submission alerts outside a detached assistant preserve overflow and upstream failure reasons", async () => {
   const browser = await chromium.launch({ executablePath, headless: true });
   try {

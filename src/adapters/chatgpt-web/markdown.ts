@@ -44,7 +44,7 @@ turndown.addRule("chatGptCodeBlock", {
     return `\n\n${fence}${language}\n${code}${code.endsWith("\n") ? "" : "\n"}${fence}\n\n`;
   },
 });
-turndown.remove(["button", "script", "style", "noscript", "iframe"]);
+turndown.remove(["button", "script", "style", "noscript"]);
 turndown.addRule("chatGptEphemeralAttachments", {
   filter: node => node.nodeName === "A" && /^(?:sandbox:|blob:|data:)/i.test((node as HTMLElement).getAttribute("href") ?? ""),
   replacement: content => `${content || "Attachment"} (attachment in ChatGPT)`,
@@ -69,6 +69,14 @@ turndown.addRule("chatGptImages", {
 });
 function visualFallback(node: HTMLElement): string | undefined {
   const kind = node.nodeName.toUpperCase();
+  if (kind === "IFRAME") {
+    if (node.getAttribute("aria-hidden") === "true" || node.hasAttribute("hidden")) return "";
+    // The frame may be cross-origin. Preserve its label without copying source
+    // URLs, srcdoc markup, or claiming to have exported its interactive behavior.
+    const label = (node.getAttribute("title") || node.getAttribute("aria-label") || "")
+      .replace(/[\[\]<>\\`*_]/g, "").replace(/\s+/g, " ").trim().slice(0, 200);
+    return `\n\n${label ? `${label} (interactive content available in ChatGPT)` : "Interactive content available in ChatGPT."}\n\n`;
+  }
   if (!["SVG", "CANVAS"].includes(kind)) return undefined;
   if (node.getAttribute("aria-hidden") === "true") return "";
   const label = node.getAttribute("aria-label")
@@ -81,7 +89,7 @@ function visualFallback(node: HTMLElement): string | undefined {
 }
 
 turndown.addRule("visualFallback", {
-  filter: node => ["SVG", "CANVAS"].includes(node.nodeName.toUpperCase()),
+  filter: node => ["SVG", "CANVAS", "IFRAME"].includes(node.nodeName.toUpperCase()),
   replacement: (_content, node) => visualFallback(node as HTMLElement) ?? "",
 });
 turndown.addRule("chatGptMath", {
@@ -122,9 +130,9 @@ turndown.addRule("removeMapAndWidgets", {
     const className = typeof el.className === "string" ? el.className : "";
 
     if (
-      /map|carousel|place-card|places|location-card|poi-/i.test(testId) ||
-      /map/i.test(ariaLabel) ||
-      /mapbox|leaflet|map-container|places-carousel|place-card/i.test(className)
+      /(?:^|[-_])(?:map|carousel|place-card|places|location-card|poi)(?:[-_]|$)/i.test(testId) ||
+      /\bmap\b/i.test(ariaLabel) ||
+      /(?:^|[\s_-])(?:mapbox(?:gl)?|leaflet|map-container|places-carousel|place-card)(?:[\s_-]|$)/i.test(className)
     ) {
       return true;
     }

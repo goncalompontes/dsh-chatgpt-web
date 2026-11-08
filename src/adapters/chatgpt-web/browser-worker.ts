@@ -208,6 +208,7 @@ const CHATGPT_DOM_REVISION_ATTRIBUTES = [
   "alt",
   "aria-hidden",
   "aria-label",
+  "title",
   "aria-busy",
   "aria-disabled",
   "aria-expanded",
@@ -3310,6 +3311,8 @@ export class ChatGptBrowserWorker {
         !initialUsers.has(identity) && state.userIdentities.includes(identity)
       ));
       let submittedPromptMatches = false;
+      let observedPromptChars: number | undefined;
+      let commonPrefixChars: number | undefined;
       if (!ownUserStillPresent && addedUsers.length === 1 && expected) {
         const actual = await withChatGptBrowserObservationTimeout(withBrowserTurnAbort(
           chatGptTurnLocator(page, addedUsers[0]!).evaluate(element => {
@@ -3330,10 +3333,21 @@ export class ChatGptBrowserWorker {
         const normalized = normalize(actual);
         // The current renderer can leave the connector's textual mention outside its pill.
         const mentions = [`$${this.config.appName} `, `${this.config.appName} `];
+        const mention = mentions.find(prefix => normalized.startsWith(prefix));
+        const observedPrompt = mention ? normalized.slice(mention.length) : normalized;
+        observedPromptChars = observedPrompt.length;
+        commonPrefixChars = 0;
+        while (commonPrefixChars < Math.min(expected.length, observedPrompt.length)
+          && expected[commonPrefixChars] === observedPrompt[commonPrefixChars]) commonPrefixChars += 1;
         submittedPromptMatches = normalized === expected
           || mentions.some(mention => normalized.startsWith(mention) && normalized.slice(mention.length) === expected);
       }
       if (!submittedPromptMatches) {
+        // Keep identity failures actionable without recording prompt contents or capabilities.
+        console.info(`[chatgpt-web] assistant_rebind_rejected ${JSON.stringify({
+          addedUsers: addedUsers.length, submittedUserStillPresent: ownUserStillPresent,
+          expectedPromptChars: expected?.length, observedPromptChars, commonPrefixChars,
+        })}`);
         throw new Error("ChatGPT opened another user turn while the bound assistant response was detached");
       }
     }
@@ -4286,9 +4300,9 @@ export class ChatGptBrowserWorker {
         const ariaLabel = candidate.getAttribute?.("aria-label") || "";
         const className = typeof candidate.className === "string" ? candidate.className : "";
         if (
-          /map|carousel|place-card|places|location-card|poi-/i.test(testId) ||
-          /map/i.test(ariaLabel) ||
-          /mapbox|leaflet|map-container|places-carousel|place-card/i.test(className)
+          /(?:^|[-_])(?:map|carousel|place-card|places|location-card|poi)(?:[-_]|$)/i.test(testId) ||
+          /\bmap\b/i.test(ariaLabel) ||
+          /(?:^|[\s_-])(?:mapbox(?:gl)?|leaflet|map-container|places-carousel|place-card)(?:[\s_-]|$)/i.test(className)
         ) {
           // A place card or a map with semantic links/headings is answer content.
           // Retain its HTML for the Markdown converter, which removes map controls while
@@ -4436,7 +4450,7 @@ export class ChatGptBrowserWorker {
           const shell = document.createElement("span");
           nodes.forEach(node => shell.append(node.cloneNode(true)));
           const text = shell.textContent?.trim() ?? "";
-          if (text || shell.querySelector("img, picture, svg[aria-label], svg title, canvas[aria-label]")) {
+          if (text || shell.querySelector("img, picture, svg[aria-label], svg title, canvas[aria-label], iframe")) {
             const rangedElements = nodes.flatMap(node => node instanceof Element
               ? [node, ...node.querySelectorAll<HTMLElement>("[data-start][data-end]")]
               : []);

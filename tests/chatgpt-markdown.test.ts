@@ -42,6 +42,27 @@ test("maps and carousels keep useful semantic places and links without controls"
   expect(chatGptHtmlToMarkdown('<div data-testid="map-widget"><button>Zoom in</button></div>')).toBe("");
 });
 
+test("ordinary roadmap and sitemap sections retain their complete prose", () => {
+  for (const attributes of ['aria-label="Roadmap"', 'data-testid="sitemap"', 'aria-label="Bitmap analysis"', 'class="roadmap-container"']) {
+    const converted = chatGptHtmlToMarkdown(`<section ${attributes}><h2>Release plan</h2><p>Keep this important paragraph.</p></section>`);
+    expect(converted).toContain('## Release plan');
+    expect(converted).toContain('Keep this important paragraph.');
+  }
+});
+
+test("embedded interactive content has an explicit fallback without exposing its source", () => {
+  const converted = chatGptHtmlToMarkdown('<p>Interactive analysis:</p>'
+    + '<iframe title="Revenue explorer" src="https://example.invalid/private?token=secret"></iframe>'
+    + '<iframe aria-label="Scenario [comparison]" srcdoc="<script>private code</script>"></iframe>'
+    + '<iframe></iframe><iframe aria-hidden="true" title="Hidden frame"></iframe>');
+  expect(converted).toContain('Revenue explorer (interactive content available in ChatGPT)');
+  expect(converted).toContain('Scenario comparison (interactive content available in ChatGPT)');
+  expect(converted).toContain('Interactive content available in ChatGPT.');
+  expect(converted).not.toContain('example.invalid');
+  expect(converted).not.toContain('private code');
+  expect(converted).not.toContain('Hidden frame');
+});
+
 test("image references remain in Markdown without embedding browser-only bytes", () => {
   expect(chatGptHtmlToMarkdown('<p>Diagram <img alt="Architecture diagram" src="https://example.org/diagram.png" /></p>'))
     .toContain('![Architecture diagram](https://example.org/diagram.png)');
