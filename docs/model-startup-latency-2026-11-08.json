@@ -1,0 +1,842 @@
+[
+  {
+    "model": "chatgpt-web/light",
+    "turn": "fresh",
+    "hostSetupSeconds": 0.9563908576965332,
+    "toSendAcceptedSeconds": 4.276973009109497,
+    "toFirstToolSeconds": 19.71351170539856,
+    "acceptedToFirstToolSeconds": 15.436538696289062,
+    "toolExecutionSeconds": 0.015125036239624023,
+    "toFirstThoughtSeconds": null,
+    "toFirstAnswerSeconds": 26.742334842681885,
+    "totalSeconds": 26.744190637997235,
+    "stages": [
+      {
+        "stage": "browser_page",
+        "seconds": 0.021
+      },
+      {
+        "stage": "temporary_chat_preparation",
+        "seconds": 1.822
+      },
+      {
+        "stage": "effort_selection",
+        "seconds": 0.758
+      },
+      {
+        "stage": "prompt_attachment",
+        "seconds": 0.383
+      },
+      {
+        "stage": "file_attachment",
+        "seconds": 0.0
+      },
+      {
+        "stage": "send",
+        "seconds": 0.919
+      }
+    ],
+    "retainedPage": false
+  },
+  {
+    "model": "chatgpt-web/light",
+    "turn": "retained",
+    "hostSetupSeconds": null,
+    "toSendAcceptedSeconds": 1.1725904941558838,
+    "toFirstToolSeconds": 11.179981708526611,
+    "acceptedToFirstToolSeconds": 10.007391214370728,
+    "toolExecutionSeconds": 0.055486202239990234,
+    "toFirstThoughtSeconds": null,
+    "toFirstAnswerSeconds": 15.980732917785645,
+    "totalSeconds": 15.983489671001735,
+    "stages": [
+      {
+        "stage": "browser_page",
+        "seconds": 0.0
+      },
+      {
+        "stage": "prompt_attachment",
+        "seconds": 0.27
+      },
+      {
+        "stage": "file_attachment",
+        "seconds": 0.0
+      },
+      {
+        "stage": "send",
+        "seconds": 0.76
+      }
+    ],
+    "retainedPage": true
+  },
+  {
+    "model": "chatgpt-web/medium",
+    "turn": "fresh",
+    "hostSetupSeconds": 1.0268900394439697,
+    "toSendAcceptedSeconds": 3.911754608154297,
+    "toFirstToolSeconds": 33.371580362319946,
+    "acceptedToFirstToolSeconds": 29.45982575416565,
+    "toolExecutionSeconds": 0.03617668151855469,
+    "toFirstThoughtSeconds": null,
+    "toFirstAnswerSeconds": 41.86762976646423,
+    "totalSeconds": 41.86953582299611,
+    "stages": [
+      {
+        "stage": "browser_page",
+        "seconds": 0.024
+      },
+      {
+        "stage": "temporary_chat_preparation",
+        "seconds": 1.499
+      },
+      {
+        "stage": "effort_selection",
+        "seconds": 0.861
+      },
+      {
+        "stage": "prompt_attachment",
+        "seconds": 0.38
+      },
+      {
+        "stage": "file_attachment",
+        "seconds": 0.0
+      },
+      {
+        "stage": "send",
+        "seconds": 0.878
+      }
+    ],
+    "retainedPage": false
+  },
+  {
+    "model": "chatgpt-web/medium",
+    "turn": "retained",
+    "hostSetupSeconds": null,
+    "toSendAcceptedSeconds": 1.1100187301635742,
+    "toFirstToolSeconds": 8.389855146408081,
+    "acceptedToFirstToolSeconds": 7.279836416244507,
+    "toolExecutionSeconds": 0.05743217468261719,
+    "toFirstThoughtSeconds": null,
+    "toFirstAnswerSeconds": 13.117326736450195,
+    "totalSeconds": 13.119536771999265,
+    "stages": [
+      {
+        "stage": "browser_page",
+        "seconds": 0.0
+      },
+      {
+        "stage": "prompt_attachment",
+        "seconds": 0.238
+      },
+      {
+        "stage": "file_attachment",
+        "seconds": 0.0
+      },
+      {
+        "stage": "send",
+        "seconds": 0.707
+      }
+    ],
+    "retainedPage": true
+  },
+  {
+    "model": "chatgpt-web/high",
+    "turn": "fresh",
+    "hostSetupSeconds": 0.9748287200927734,
+    "toSendAcceptedSeconds": 3.8435678482055664,
+    "toFirstToolSeconds": 27.710481643676758,
+    "acceptedToFirstToolSeconds": 23.86691379547119,
+    "toolExecutionSeconds": 0.10819315910339355,
+    "toFirstThoughtSeconds": null,
+    "toFirstAnswerSeconds": 36.75600743293762,
+    "totalSeconds": 36.7581296089993,
+    "stages": [
+      {
+        "stage": "browser_page",
+        "seconds": 0.024
+      },
+      {
+        "stage": "temporary_chat_preparation",
+        "seconds": 1.507
+      },
+      {
+        "stage": "effort_selection",
+        "seconds": 0.913
+      },
+      {
+        "stage": "prompt_attachment",
+        "seconds": 0.39
+      },
+      {
+        "stage": "file_attachment",
+        "seconds": 0.0
+      },
+      {
+        "stage": "send",
+        "seconds": 0.87
+      }
+    ],
+    "retainedPage": false
+  },
+  {
+    "model": "chatgpt-web/high",
+    "turn": "retained",
+    "hostSetupSeconds": null,
+    "toSendAcceptedSeconds": 1.1092424392700195,
+    "toFirstToolSeconds": 15.602781295776367,
+    "acceptedToFirstToolSeconds": 14.493538856506348,
+    "toolExecutionSeconds": 0.02132725715637207,
+    "toFirstThoughtSeconds": null,
+    "toFirstAnswerSeconds": 22.52957057952881,
+    "totalSeconds": 22.531260326002666,
+    "stages": [
+      {
+        "stage": "browser_page",
+        "seconds": 0.0
+      },
+      {
+        "stage": "prompt_attachment",
+        "seconds": 0.209
+      },
+      {
+        "stage": "file_attachment",
+        "seconds": 0.0
+      },
+      {
+        "stage": "send",
+        "seconds": 0.691
+      }
+    ],
+    "retainedPage": true
+  },
+  {
+    "model": "chatgpt-web/gpt-6-light",
+    "turn": "fresh",
+    "hostSetupSeconds": 1.0135490894317627,
+    "toSendAcceptedSeconds": 3.7780959606170654,
+    "toFirstToolSeconds": 19.95977282524109,
+    "acceptedToFirstToolSeconds": 16.181676864624023,
+    "toolExecutionSeconds": 0.07167482376098633,
+    "toFirstThoughtSeconds": null,
+    "toFirstAnswerSeconds": 27.278700351715088,
+    "totalSeconds": 27.28249816299649,
+    "stages": [
+      {
+        "stage": "browser_page",
+        "seconds": 0.028
+      },
+      {
+        "stage": "temporary_chat_preparation",
+        "seconds": 1.619
+      },
+      {
+        "stage": "effort_selection",
+        "seconds": 0.668
+      },
+      {
+        "stage": "prompt_attachment",
+        "seconds": 0.46
+      },
+      {
+        "stage": "file_attachment",
+        "seconds": 0.0
+      },
+      {
+        "stage": "send",
+        "seconds": 0.857
+      }
+    ],
+    "retainedPage": false
+  },
+  {
+    "model": "chatgpt-web/gpt-6-light",
+    "turn": "retained",
+    "hostSetupSeconds": null,
+    "toSendAcceptedSeconds": 1.0830776691436768,
+    "toFirstToolSeconds": 7.960602521896362,
+    "acceptedToFirstToolSeconds": 6.8775248527526855,
+    "toolExecutionSeconds": 0.07983970642089844,
+    "toFirstThoughtSeconds": null,
+    "toFirstAnswerSeconds": 14.60653829574585,
+    "totalSeconds": 14.610155704001954,
+    "stages": [
+      {
+        "stage": "browser_page",
+        "seconds": 0.0
+      },
+      {
+        "stage": "prompt_attachment",
+        "seconds": 0.2
+      },
+      {
+        "stage": "file_attachment",
+        "seconds": 0.0
+      },
+      {
+        "stage": "send",
+        "seconds": 0.686
+      }
+    ],
+    "retainedPage": true
+  },
+  {
+    "model": "chatgpt-web/gpt-6-medium",
+    "turn": "fresh",
+    "hostSetupSeconds": 1.0261740684509277,
+    "toSendAcceptedSeconds": 3.6456658840179443,
+    "toFirstToolSeconds": 21.566361904144287,
+    "acceptedToFirstToolSeconds": 17.920696020126343,
+    "toolExecutionSeconds": 0.020814180374145508,
+    "toFirstThoughtSeconds": null,
+    "toFirstAnswerSeconds": 28.788864135742188,
+    "totalSeconds": 28.790821213005984,
+    "stages": [
+      {
+        "stage": "browser_page",
+        "seconds": 0.019
+      },
+      {
+        "stage": "temporary_chat_preparation",
+        "seconds": 1.538
+      },
+      {
+        "stage": "effort_selection",
+        "seconds": 0.637
+      },
+      {
+        "stage": "prompt_attachment",
+        "seconds": 0.47
+      },
+      {
+        "stage": "file_attachment",
+        "seconds": 0.0
+      },
+      {
+        "stage": "send",
+        "seconds": 0.845
+      }
+    ],
+    "retainedPage": false
+  },
+  {
+    "model": "chatgpt-web/gpt-6-medium",
+    "turn": "retained",
+    "hostSetupSeconds": null,
+    "toSendAcceptedSeconds": 1.3046164512634277,
+    "toFirstToolSeconds": 8.59214186668396,
+    "acceptedToFirstToolSeconds": 7.287525415420532,
+    "toolExecutionSeconds": 0.07515335083007812,
+    "toFirstThoughtSeconds": null,
+    "toFirstAnswerSeconds": 13.921442031860352,
+    "totalSeconds": 13.924647974003165,
+    "stages": [
+      {
+        "stage": "browser_page",
+        "seconds": 0.0
+      },
+      {
+        "stage": "prompt_attachment",
+        "seconds": 0.263
+      },
+      {
+        "stage": "file_attachment",
+        "seconds": 0.0
+      },
+      {
+        "stage": "send",
+        "seconds": 0.785
+      }
+    ],
+    "retainedPage": true
+  },
+  {
+    "model": "chatgpt-web/gpt-6-high",
+    "turn": "fresh",
+    "hostSetupSeconds": 0.9610040187835693,
+    "toSendAcceptedSeconds": 4.197054147720337,
+    "toFirstToolSeconds": 33.02086400985718,
+    "acceptedToFirstToolSeconds": 28.82380986213684,
+    "toolExecutionSeconds": 0.06781363487243652,
+    "toFirstThoughtSeconds": null,
+    "toFirstAnswerSeconds": 41.066941022872925,
+    "totalSeconds": 41.06870591799816,
+    "stages": [
+      {
+        "stage": "browser_page",
+        "seconds": 0.021
+      },
+      {
+        "stage": "temporary_chat_preparation",
+        "seconds": 1.836
+      },
+      {
+        "stage": "effort_selection",
+        "seconds": 0.684
+      },
+      {
+        "stage": "prompt_attachment",
+        "seconds": 0.549
+      },
+      {
+        "stage": "file_attachment",
+        "seconds": 0.0
+      },
+      {
+        "stage": "send",
+        "seconds": 0.918
+      }
+    ],
+    "retainedPage": false
+  },
+  {
+    "model": "chatgpt-web/gpt-6-high",
+    "turn": "retained",
+    "hostSetupSeconds": null,
+    "toSendAcceptedSeconds": 1.0841755867004395,
+    "toFirstToolSeconds": 9.575904846191406,
+    "acceptedToFirstToolSeconds": 8.491729259490967,
+    "toolExecutionSeconds": 0.13546442985534668,
+    "toFirstThoughtSeconds": null,
+    "toFirstAnswerSeconds": 14.092636823654175,
+    "totalSeconds": 14.094497180005419,
+    "stages": [
+      {
+        "stage": "browser_page",
+        "seconds": 0.0
+      },
+      {
+        "stage": "prompt_attachment",
+        "seconds": 0.242
+      },
+      {
+        "stage": "file_attachment",
+        "seconds": 0.0
+      },
+      {
+        "stage": "send",
+        "seconds": 0.658
+      }
+    ],
+    "retainedPage": true
+  },
+  {
+    "model": "chatgpt-web/gpt-6-high",
+    "turn": "fresh",
+    "hostSetupSeconds": 0.9090068340301514,
+    "toSendAcceptedSeconds": 3.7834455966949463,
+    "toFirstToolSeconds": 25.227970600128174,
+    "acceptedToFirstToolSeconds": 21.444525003433228,
+    "toolExecutionSeconds": 0.10413789749145508,
+    "toFirstThoughtSeconds": null,
+    "toFirstAnswerSeconds": 33.05569243431091,
+    "totalSeconds": 33.057502876996296,
+    "stages": [
+      {
+        "stage": "browser_page",
+        "seconds": 0.023
+      },
+      {
+        "stage": "temporary_chat_preparation",
+        "seconds": 1.668
+      },
+      {
+        "stage": "effort_selection",
+        "seconds": 0.658
+      },
+      {
+        "stage": "prompt_attachment",
+        "seconds": 0.446
+      },
+      {
+        "stage": "file_attachment",
+        "seconds": 0.0
+      },
+      {
+        "stage": "send",
+        "seconds": 0.854
+      }
+    ],
+    "retainedPage": false
+  },
+  {
+    "model": "chatgpt-web/gpt-6-high",
+    "turn": "retained",
+    "hostSetupSeconds": null,
+    "toSendAcceptedSeconds": 1.1967551708221436,
+    "toFirstToolSeconds": 9.285314798355103,
+    "acceptedToFirstToolSeconds": 8.088559627532959,
+    "toolExecutionSeconds": 0.01813817024230957,
+    "toFirstThoughtSeconds": null,
+    "toFirstAnswerSeconds": 16.094757795333862,
+    "totalSeconds": 16.09647798199876,
+    "stages": [
+      {
+        "stage": "browser_page",
+        "seconds": 0.0
+      },
+      {
+        "stage": "prompt_attachment",
+        "seconds": 0.203
+      },
+      {
+        "stage": "file_attachment",
+        "seconds": 0.0
+      },
+      {
+        "stage": "send",
+        "seconds": 0.744
+      }
+    ],
+    "retainedPage": true
+  },
+  {
+    "model": "chatgpt-web/gpt-6-medium",
+    "turn": "fresh",
+    "hostSetupSeconds": 0.8945896625518799,
+    "toSendAcceptedSeconds": 9.615963459014893,
+    "toFirstToolSeconds": 28.992084503173828,
+    "acceptedToFirstToolSeconds": 19.376121044158936,
+    "toolExecutionSeconds": 0.09468483924865723,
+    "toFirstThoughtSeconds": null,
+    "toFirstAnswerSeconds": 36.03507113456726,
+    "totalSeconds": 36.03700057700189,
+    "stages": [
+      {
+        "stage": "browser_page",
+        "seconds": 0.022
+      },
+      {
+        "stage": "temporary_chat_preparation",
+        "seconds": 7.725
+      },
+      {
+        "stage": "effort_selection",
+        "seconds": 0.539
+      },
+      {
+        "stage": "prompt_attachment",
+        "seconds": 0.388
+      },
+      {
+        "stage": "file_attachment",
+        "seconds": 0.0
+      },
+      {
+        "stage": "send",
+        "seconds": 0.802
+      }
+    ],
+    "retainedPage": false
+  },
+  {
+    "model": "chatgpt-web/gpt-6-medium",
+    "turn": "retained",
+    "hostSetupSeconds": null,
+    "toSendAcceptedSeconds": 1.042783498764038,
+    "toFirstToolSeconds": 8.187913179397583,
+    "acceptedToFirstToolSeconds": 7.145129680633545,
+    "toolExecutionSeconds": 0.02156209945678711,
+    "toFirstThoughtSeconds": null,
+    "toFirstAnswerSeconds": 14.899307250976562,
+    "totalSeconds": 14.901127634002478,
+    "stages": [
+      {
+        "stage": "browser_page",
+        "seconds": 0.0
+      },
+      {
+        "stage": "prompt_attachment",
+        "seconds": 0.203
+      },
+      {
+        "stage": "file_attachment",
+        "seconds": 0.0
+      },
+      {
+        "stage": "send",
+        "seconds": 0.754
+      }
+    ],
+    "retainedPage": true
+  },
+  {
+    "model": "chatgpt-web/gpt-6-light",
+    "turn": "fresh",
+    "hostSetupSeconds": 0.9297642707824707,
+    "toSendAcceptedSeconds": 3.8144776821136475,
+    "toFirstToolSeconds": 14.29647445678711,
+    "acceptedToFirstToolSeconds": 10.481996774673462,
+    "toolExecutionSeconds": 0.018643856048583984,
+    "toFirstThoughtSeconds": null,
+    "toFirstAnswerSeconds": 21.058466911315918,
+    "totalSeconds": 21.060352061998856,
+    "stages": [
+      {
+        "stage": "browser_page",
+        "seconds": 0.027
+      },
+      {
+        "stage": "temporary_chat_preparation",
+        "seconds": 1.572
+      },
+      {
+        "stage": "effort_selection",
+        "seconds": 0.668
+      },
+      {
+        "stage": "prompt_attachment",
+        "seconds": 0.478
+      },
+      {
+        "stage": "file_attachment",
+        "seconds": 0.0
+      },
+      {
+        "stage": "send",
+        "seconds": 0.878
+      }
+    ],
+    "retainedPage": false
+  },
+  {
+    "model": "chatgpt-web/gpt-6-light",
+    "turn": "retained",
+    "hostSetupSeconds": null,
+    "toSendAcceptedSeconds": 1.2298824787139893,
+    "toFirstToolSeconds": 11.853487491607666,
+    "acceptedToFirstToolSeconds": 10.623605012893677,
+    "toolExecutionSeconds": 0.030376434326171875,
+    "toFirstThoughtSeconds": null,
+    "toFirstAnswerSeconds": 18.073441743850708,
+    "totalSeconds": 18.076789128994278,
+    "stages": [
+      {
+        "stage": "browser_page",
+        "seconds": 0.0
+      },
+      {
+        "stage": "prompt_attachment",
+        "seconds": 0.236
+      },
+      {
+        "stage": "file_attachment",
+        "seconds": 0.0
+      },
+      {
+        "stage": "send",
+        "seconds": 0.861
+      }
+    ],
+    "retainedPage": true
+  },
+  {
+    "model": "chatgpt-web/high",
+    "turn": "fresh",
+    "hostSetupSeconds": 0.9453403949737549,
+    "toSendAcceptedSeconds": 3.779031753540039,
+    "toFirstToolSeconds": 24.083940029144287,
+    "acceptedToFirstToolSeconds": 20.304908275604248,
+    "toolExecutionSeconds": 0.024255037307739258,
+    "toFirstThoughtSeconds": null,
+    "toFirstAnswerSeconds": 31.820632696151733,
+    "totalSeconds": 31.8230568259969,
+    "stages": [
+      {
+        "stage": "browser_page",
+        "seconds": 0.024
+      },
+      {
+        "stage": "temporary_chat_preparation",
+        "seconds": 1.464
+      },
+      {
+        "stage": "effort_selection",
+        "seconds": 0.901
+      },
+      {
+        "stage": "prompt_attachment",
+        "seconds": 0.402
+      },
+      {
+        "stage": "file_attachment",
+        "seconds": 0.0
+      },
+      {
+        "stage": "send",
+        "seconds": 0.852
+      }
+    ],
+    "retainedPage": false
+  },
+  {
+    "model": "chatgpt-web/high",
+    "turn": "retained",
+    "hostSetupSeconds": null,
+    "toSendAcceptedSeconds": 1.0656113624572754,
+    "toFirstToolSeconds": 12.612248420715332,
+    "acceptedToFirstToolSeconds": 11.546637058258057,
+    "toolExecutionSeconds": 0.014099359512329102,
+    "toFirstThoughtSeconds": null,
+    "toFirstAnswerSeconds": 19.235255241394043,
+    "totalSeconds": 19.23750934599957,
+    "stages": [
+      {
+        "stage": "browser_page",
+        "seconds": 0.0
+      },
+      {
+        "stage": "prompt_attachment",
+        "seconds": 0.225
+      },
+      {
+        "stage": "file_attachment",
+        "seconds": 0.0
+      },
+      {
+        "stage": "send",
+        "seconds": 0.687
+      }
+    ],
+    "retainedPage": true
+  },
+  {
+    "model": "chatgpt-web/medium",
+    "turn": "fresh",
+    "hostSetupSeconds": 0.9409618377685547,
+    "toSendAcceptedSeconds": 4.098202466964722,
+    "toFirstToolSeconds": 14.777294874191284,
+    "acceptedToFirstToolSeconds": 10.679092407226562,
+    "toolExecutionSeconds": 0.013870716094970703,
+    "toFirstThoughtSeconds": null,
+    "toFirstAnswerSeconds": 22.124548196792603,
+    "totalSeconds": 22.12624921400129,
+    "stages": [
+      {
+        "stage": "browser_page",
+        "seconds": 0.029
+      },
+      {
+        "stage": "temporary_chat_preparation",
+        "seconds": 1.573
+      },
+      {
+        "stage": "effort_selection",
+        "seconds": 1.08
+      },
+      {
+        "stage": "prompt_attachment",
+        "seconds": 0.367
+      },
+      {
+        "stage": "file_attachment",
+        "seconds": 0.0
+      },
+      {
+        "stage": "send",
+        "seconds": 0.843
+      }
+    ],
+    "retainedPage": false
+  },
+  {
+    "model": "chatgpt-web/medium",
+    "turn": "retained",
+    "hostSetupSeconds": null,
+    "toSendAcceptedSeconds": 1.1021311283111572,
+    "toFirstToolSeconds": 7.43834114074707,
+    "acceptedToFirstToolSeconds": 6.336210012435913,
+    "toolExecutionSeconds": 0.06868362426757812,
+    "toFirstThoughtSeconds": null,
+    "toFirstAnswerSeconds": 13.9602632522583,
+    "totalSeconds": 13.962368780994439,
+    "stages": [
+      {
+        "stage": "browser_page",
+        "seconds": 0.0
+      },
+      {
+        "stage": "prompt_attachment",
+        "seconds": 0.201
+      },
+      {
+        "stage": "file_attachment",
+        "seconds": 0.0
+      },
+      {
+        "stage": "send",
+        "seconds": 0.743
+      }
+    ],
+    "retainedPage": true
+  },
+  {
+    "model": "chatgpt-web/light",
+    "turn": "fresh",
+    "hostSetupSeconds": 0.9439899921417236,
+    "toSendAcceptedSeconds": 4.660951375961304,
+    "toFirstToolSeconds": 25.03854012489319,
+    "acceptedToFirstToolSeconds": 20.377588748931885,
+    "toolExecutionSeconds": 0.027846813201904297,
+    "toFirstThoughtSeconds": null,
+    "toFirstAnswerSeconds": 30.96846652030945,
+    "totalSeconds": 30.970328621995577,
+    "stages": [
+      {
+        "stage": "browser_page",
+        "seconds": 0.03
+      },
+      {
+        "stage": "temporary_chat_preparation",
+        "seconds": 2.463
+      },
+      {
+        "stage": "effort_selection",
+        "seconds": 0.71
+      },
+      {
+        "stage": "prompt_attachment",
+        "seconds": 0.39
+      },
+      {
+        "stage": "file_attachment",
+        "seconds": 0.0
+      },
+      {
+        "stage": "send",
+        "seconds": 0.861
+      }
+    ],
+    "retainedPage": false
+  },
+  {
+    "model": "chatgpt-web/light",
+    "turn": "retained",
+    "hostSetupSeconds": null,
+    "toSendAcceptedSeconds": 1.0976159572601318,
+    "toFirstToolSeconds": 7.916052579879761,
+    "acceptedToFirstToolSeconds": 6.818436622619629,
+    "toolExecutionSeconds": 0.04820108413696289,
+    "toFirstThoughtSeconds": null,
+    "toFirstAnswerSeconds": 15.2779860496521,
+    "totalSeconds": 15.279638819003594,
+    "stages": [
+      {
+        "stage": "browser_page",
+        "seconds": 0.0
+      },
+      {
+        "stage": "prompt_attachment",
+        "seconds": 0.209
+      },
+      {
+        "stage": "file_attachment",
+        "seconds": 0.0
+      },
+      {
+        "stage": "send",
+        "seconds": 0.671
+      }
+    ],
+    "retainedPage": true
+  }
+]

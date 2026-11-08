@@ -3,6 +3,7 @@
 import argparse
 import asyncio
 import json
+import re
 from pathlib import Path
 import shutil
 import tempfile
@@ -11,6 +12,8 @@ import time
 
 async def main(args):
     updates = []
+    update_times = []
+    launched_at = time.time()
     captured = tempfile.NamedTemporaryFile(prefix="dsh-acp-updates-", suffix=".jsonl", mode="w", delete=False) if args.capture_updates else None
     sequence = 0
     session = None
@@ -58,6 +61,7 @@ async def main(args):
                 if message.get("method") == "session/update":
                     update = message["params"]["update"]
                     updates.append(update)
+                    update_times.append(time.time())
                     if captured:
                         captured.write(json.dumps(update) + "\n")
                         captured.flush()
@@ -72,6 +76,9 @@ async def main(args):
     async def prompt(text, marker, required):
         start = len(updates)
         began = time.monotonic()
+        sent_at = time.time()
+        sidecar_log = Path.home() / ".local/state/dsh-web-stack/sidecar.log"
+        log_offset = sidecar_log.stat().st_size if args.scenario == "latency" else None
         result = await request("session/prompt", {
             "sessionId": session, "prompt": [{"type": "text", "text": text}],
         })
@@ -83,6 +90,29 @@ async def main(args):
         assert result.get("stopReason") == "end_turn", result
         assert marker in answer.replace("\\_", "_"), answer
         assert required <= {u.get("title") for u in completed}, completed
+        if args.scenario == "latency":
+            assert len(started) == len(completed) == 1 and completed[0]["title"] == "read", completed
+            # Preserve wall-clock event times for correlation with diagnostic capturedAt;
+            # elapsed total uses the monotonic clock. No synthetic progress is counted.
+            events = [{"at": at, "type": u.get("sessionUpdate"), "title": u.get("title"), "status": u.get("status")}
+                      for u, at in zip(turn, update_times[start:])]
+            sidecar = sidecar_log.read_bytes()[log_offset:].decode(errors="replace")
+            row = {"model": args.model, "session": session, "turn": args.latency_turn,
+                   "sentAt": sent_at, "hostSetupSeconds": sent_at - launched_at if args.latency_turn == "fresh" else None,
+                   "elapsedSeconds": time.monotonic() - began, "events": events,
+                   "traceIds": list(dict.fromkeys(re.findall(r"managed_conversation trace=([a-f0-9]+)", sidecar))),
+                   "sidecarLog": sidecar}
+            row["diagnosticCheckpoints"] = []
+            if len(row["traceIds"]) == 1:
+                trace = row["traceIds"][0]
+                folders = re.findall(r"browser diagnostic trace=" + trace + r" .*? path=([^\n]+)", sidecar)
+                for folder in set(folders):
+                    for path in Path(folder).glob("*.json"):
+                        data = json.loads(path.read_text())
+                        row["diagnosticCheckpoints"].append({"name": data["checkpoint"], "capturedAt": data["capturedAt"]})
+            with Path(args.latency_output).open("a") as output:
+                output.write(json.dumps(row) + "\n")
+            print(json.dumps({"latency": {k: v for k, v in row.items() if k not in ("events", "sidecarLog", "diagnosticCheckpoints")}}), flush=True)
         if args.scenario == "load":
             assert len(started) == 1 and len(completed) == 1, "Load check must execute exactly one foreground tool"
             assert marker in json.dumps(completed[0].get("content", [])), "Native tool output did not contain the marker"
@@ -125,7 +155,13 @@ async def main(args):
             "sessionId": session, "configId": model["id"],
             "value": json.dumps(["chatgpt-web", args.model], separators=(",", ":")),
         })
-        if args.scenario == "context-isolation":
+        if args.scenario == "latency":
+            for kind in ("fresh", "retained"):
+                args.latency_turn = kind
+                await prompt("Read-only timing check. Use read exactly once to read the first 5 lines of README.md. "
+                             "Then reply DSH_LATENCY_OK only. Do not use other tools or change files.",
+                             "DSH_LATENCY_OK", {"read"})
+        elif args.scenario == "context-isolation":
             topic = "Lisbon public transport: Metro Lisboa, CP trains and Carris buses" if args.context_topic == "transit" else "Vista: remotely streaming individual Linux Wayland applications to an iPhone"
             label = "TRANSIT" if args.context_topic == "transit" else "VISTA"
             marker = f"DSH_{label}_{session[:8]}"
@@ -342,12 +378,15 @@ if __name__ == "__main__":
     parser.add_argument("--dsh", default=shutil.which("dsh") or str(Path.home() / ".local/bin/dsh"))
     parser.add_argument("--cwd", default=str(Path.cwd()))
     parser.add_argument("--model", default="chatgpt-web/gpt-6-light")
-    parser.add_argument("--scenario", choices=("tool", "load", "background", "background-long", "resume", "reconnect", "cancel", "parallel", "parallel-batch", "mixed-failure", "compact", "compact-active", "native-failure", "context-isolation"), default="tool")
+    parser.add_argument("--scenario", choices=("tool", "load", "background", "background-long", "resume", "reconnect", "cancel", "parallel", "parallel-batch", "mixed-failure", "compact", "compact-active", "native-failure", "context-isolation", "latency"), default="tool")
+    parser.add_argument("--latency-output", help="Private JSONL timing evidence for the latency scenario")
     parser.add_argument("--context-topic", choices=("transit", "vista"), default="transit")
     parser.add_argument("--timeout", type=float, default=180)
     parser.add_argument("--load-seconds", type=int, default=30)
     parser.add_argument("--capture-updates", action="store_true", help="Retain private ACP update JSONL for consumer compatibility probes")
     args = parser.parse_args()
+    if args.scenario == "latency" and not args.latency_output:
+        parser.error("--latency-output is required for the latency scenario")
     if not 1 <= args.load_seconds <= 300:
         parser.error("--load-seconds must be between 1 and 300")
     asyncio.run(main(args))
