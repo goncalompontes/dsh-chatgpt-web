@@ -1,6 +1,8 @@
 import { createHash, randomBytes } from "node:crypto";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
+import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import * as z from "zod/v4";
 import { namespacedToolName, type CodexTool } from "../../types";
 import { VERSION } from "../../version";
@@ -497,7 +499,8 @@ function execCommandGatewayProgram(
 export async function runChatGptMcpServer(options: {
   brokerSocketPath: string;
   contract?: ChatGptMcpContract;
-}): Promise<void> {
+  transport?: Transport;
+}): Promise<McpServer> {
   const contract = options.contract ?? "native";
   const server = new McpServer(
     { name: contract === "safe" ? "codex-safe" : "codex-native", version: VERSION },
@@ -662,6 +665,61 @@ export async function runChatGptMcpServer(options: {
   };
 
   if (contract === "native") {
+    server.registerTool(
+      "dsh_parallel",
+      {
+        title: "Submit independent native DSH calls together",
+        description: "Submit 1–8 independent calls from the current DSH inventory in one connector request. DSH retains native tool names, approvals and scheduling; concurrency-safe calls may overlap, while exclusive tools remain serialized. All calls are validated before any start. Results retain input order and individual failures; never retry the entire batch after a partial failure.",
+        inputSchema: {
+          turn_token: turnTokenSchema,
+          calls: z.array(z.object({
+            wire_name: z.string().min(1).max(1000),
+            arguments: jsonArgumentsSchema.optional(),
+            input: z.string().max(5_000_000).optional(),
+          })).min(1).max(8),
+        },
+        annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
+      },
+      async ({ turn_token, calls }, extra) => withClaimedTurn("dsh_parallel", turn_token, extra, async claimed => {
+        const bound = claimed.environment;
+        // Validate the entire batch first: a bad later entry must never dispatch an earlier one.
+        const prepared = calls.map(call => {
+          const tool = safeVisibleTools(bound, contract).find(candidate => wireName(candidate) === call.wire_name);
+          if (!tool || call.wire_name === CODEX_COMPACTION_CONTROL_WIRE_NAME || BRIDGE_TOOL_NAMES.has(tool.name)) {
+            throw new Error(`DSH tool is not available for a native batch: ${call.wire_name}`);
+          }
+          if (tool.freeform) {
+            if (call.input === undefined || Object.keys(call.arguments ?? {}).length) {
+              throw new Error(`DSH freeform tool ${call.wire_name} requires input instead of arguments`);
+            }
+            return { tool, payload: { input: call.input } };
+          }
+          if (call.input !== undefined) throw new Error(`DSH function tool ${call.wire_name} accepts arguments instead of input`);
+          const args = call.arguments ?? {};
+          assertBrowserToolArguments(tool, args);
+          return { tool, payload: { arguments: args } };
+        });
+        // Start all broker invocations before awaiting any result. The native DSH
+        // runtime, rather than this transport, decides which calls are safe to overlap.
+        const settled = await Promise.allSettled(prepared.map(({ tool, payload }) =>
+          invoke(claimed.bindingId, bound, tool, payload, extra.signal)));
+        const results = settled.map((entry, index) => ({
+          index, wire_name: calls[index]!.wire_name,
+          ...(entry.status === "fulfilled" ? entry.value : {
+            isError: true,
+            content: [{ type: "text" as const, text: entry.reason instanceof Error ? entry.reason.message : String(entry.reason) }],
+          }),
+        }));
+        return {
+          content: results.flatMap(entry => [
+            { type: "text" as const, text: JSON.stringify({ index: entry.index, wire_name: entry.wire_name, isError: entry.isError === true }) },
+            ...entry.content as CallToolResult["content"],
+          ]),
+          structuredContent: { results },
+          ...(results.some(entry => entry.isError) ? { isError: true } : {}),
+        };
+      }),
+    );
     for (const directName of DIRECT_DSH_TOOL_NAMES) {
       server.registerTool(
         directName,
@@ -1044,5 +1102,6 @@ export async function runChatGptMcpServer(options: {
     );
   }
 
-  await server.connect(new StdioServerTransport());
+  await server.connect(options.transport ?? new StdioServerTransport());
+  return server;
 }

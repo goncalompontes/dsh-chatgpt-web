@@ -89,6 +89,9 @@ remains covered by Chromium fixtures.
 
 ## Concurrency evidence limits
 
+See `dsh-parallel-batch-2026-11-08.md` for the native `dsh_parallel` batch transport
+added after the model-driven overlap runs remained serial.
+
 A delayed pair of foreground bash calls also completed serially. Broker trace
 `00c3d25f1004` shows the second invocation queued only after the first completed.
 That run did not exercise a multi-call batch. More fundamentally, native DSH
