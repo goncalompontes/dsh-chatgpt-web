@@ -1,6 +1,6 @@
 # DSH session continuity
 
-The DSH provider keeps a completed managed Chrome Temporary Chat for the next user turn. When the canonical DSH history matches that completed conversation, the next browser message includes current instructions and only messages after the previous assistant reply. ChatGPT can then manage its existing conversation as it normally does. DSH retains the canonical transcript for replay, session resume, branching and recovery.
+The DSH provider keeps a completed managed Chrome Temporary Chat for the next user turn. When the canonical DSH history matches that completed conversation, the next browser message includes current instructions, the preceding assistant reply, and the subsequent messages. Echoing that reply gives ambiguous follow-ups an explicit topic anchor instead of depending solely on ChatGPT's retained transcript or account context. DSH retains the canonical transcript for replay, session resume, branching and recovery.
 
 The plugin uses the native `llm-pi-ai/request-headers` waterfall to send `x-dsh-session-id` and auxiliary `x-dsh-request-purpose` to its own local sidecar. These are transport metadata, never prompt instructions. Each DSH session gets its own browser identity; title generation and compaction requests remain separate from normal agent turns. Tool-result continuations keep the original turn identity.
 

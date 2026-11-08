@@ -44,7 +44,8 @@ export function chatGptConversationKey(
   })).digest("hex");
 }
 
-/** Full history remains canonical; a retained epoch receives only the suffix after its last assistant reply. */
+/** Full history remains canonical. Echo the last answer as an explicit topic anchor for
+ * ambiguous follow-ups instead of relying solely on ChatGPT's retained/account context. */
 export function retainedConversationResumeRequest(
   parsed: CodexParsedRequest,
 ): CodexParsedRequest | undefined {
@@ -54,7 +55,7 @@ export function retainedConversationResumeRequest(
     ...parsed,
     context: {
       ...parsed.context,
-      messages: parsed.context.messages.slice(lastAssistant + 1),
+      messages: parsed.context.messages.slice(lastAssistant),
     },
   };
 }

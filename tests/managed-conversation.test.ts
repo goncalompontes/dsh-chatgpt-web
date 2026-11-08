@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test";
 import { ManagedConversationPool, conversationHistoryFingerprint, conversationPredecessorFingerprint } from "../src/adapters/chatgpt-web/managed-conversation";
-import { retainedConversationResumeRequest } from "../src/adapters/chatgpt-web/conversation-key";
+import { chatGptConversationKey, retainedConversationResumeRequest } from "../src/adapters/chatgpt-web/conversation-key";
+import { compileChatGptWebPrompt } from "../src/adapters/chatgpt-web/prompt";
 import { parseRequest } from "../src/responses/parser";
 
 class Page {
@@ -47,10 +48,34 @@ test("canonical tool rounds and pi-ai replay metadata preserve the predecessor p
     { role: "assistant", content: "ONE" }, { role: "user", content: "now TWO" }] });
   expect(conversationPredecessorFingerprint(next.context.messages)).toBe(expected);
   const resume = retainedConversationResumeRequest(next)!;
-  expect(resume.context.messages).toHaveLength(1);
-  expect(resume.context.messages[0]!.content).toBe("now TWO");
+  expect(resume.context.messages).toHaveLength(2);
+  expect(resume.context.messages[0]!.role).toBe("assistant");
+  expect(resume.context.messages[0]!.content).toEqual([{ type: "text", text: "ONE" }]);
+  expect(resume.context.messages[1]!.content).toBe("now TWO");
   const branch = parseRequest({ model: "chatgpt-web/gpt-6-high", input: [
     { role: "user", content: "different initial goal" }, ...input.slice(1),
     { role: "assistant", content: "ONE" }, { role: "user", content: "now TWO" }] });
   expect(conversationPredecessorFingerprint(branch.context.messages)).not.toBe(expected);
+});
+
+test("ambiguous follow-ups carry their own preceding answer across concurrent topics", () => {
+  const make = (session: string, answer: string) => parseRequest({
+    model: "gpt-6", _dshSessionId: session, input: [
+      { role: "user", content: "Please research the available information." },
+      { role: "assistant", content: answer },
+      { role: "user", content: "Are there iPhone apps that already have all this information?" },
+    ],
+  });
+  const transit = make("transit-session", "Metro Lisboa, CP trains and Carris buses: LISBON_TOPIC_REFERENCE");
+  const vista = make("vista-session", "Vista streams Linux Wayland applications: VISTA_TOPIC_REFERENCE");
+  expect(chatGptConversationKey(transit, "provider")).not.toBe(chatGptConversationKey(vista, "provider"));
+  for (const [input, own, other] of [[transit, "LISBON_TOPIC_REFERENCE", "VISTA_TOPIC_REFERENCE"],
+    [vista, "VISTA_TOPIC_REFERENCE", "LISBON_TOPIC_REFERENCE"]] as const) {
+    const resume = retainedConversationResumeRequest(input)!;
+    const compiled = compileChatGptWebPrompt(resume, { localToolsEnabled: false, solAvailable: true, proAvailable: false });
+    expect(compiled.text).toContain(own);
+    expect(compiled.text).not.toContain(other);
+    expect(compiled.text).toContain("Are there iPhone apps");
+    expect(compiled.text).toContain("Do not substitute topics from ChatGPT account memories");
+  }
 });

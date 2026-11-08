@@ -125,7 +125,29 @@ async def main(args):
             "sessionId": session, "configId": model["id"],
             "value": json.dumps(["chatgpt-web", args.model], separators=(",", ":")),
         })
-        if args.scenario == "cancel":
+        if args.scenario == "context-isolation":
+            topic = "Lisbon public transport: Metro Lisboa, CP trains and Carris buses" if args.context_topic == "transit" else "Vista: remotely streaming individual Linux Wayland applications to an iPhone"
+            label = "TRANSIT" if args.context_topic == "transit" else "VISTA"
+            marker = f"DSH_{label}_{session[:8]}"
+            await prompt(
+                f"Read-only conversation isolation check. Our topic is {topic}. "
+                f"Our private reference is {marker}. Give one short sentence describing our topic and include the reference exactly. "
+                "Do not use tools or access files.", marker, set(),
+            )
+            followup_start = len(updates)
+            await prompt(
+                "Are there iPhone apps that already have all this information? "
+                "Name the topic we were discussing, give one relevant app example, and repeat our private reference. "
+                "Answer in at most three sentences. Do not use tools or access files.", marker, set(),
+            )
+            followup = "".join(u.get("content", {}).get("text", "") for u in updates[followup_start:]
+                               if u.get("sessionUpdate") == "agent_message_chunk").lower()
+            if args.context_topic == "transit":
+                assert "lisbon" in followup and "vista" not in followup, followup
+            else:
+                assert "vista" in followup and "lisbon" not in followup, followup
+            assert not any(u.get("sessionUpdate") == "tool_call" for u in updates), "Context check unexpectedly executed tools"
+        elif args.scenario == "cancel":
             cancel_on_tool = True
             result = await request("session/prompt", {
                 "sessionId": session, "prompt": [{"type": "text", "text":
@@ -320,7 +342,8 @@ if __name__ == "__main__":
     parser.add_argument("--dsh", default=shutil.which("dsh") or str(Path.home() / ".local/bin/dsh"))
     parser.add_argument("--cwd", default=str(Path.cwd()))
     parser.add_argument("--model", default="chatgpt-web/gpt-6-light")
-    parser.add_argument("--scenario", choices=("tool", "load", "background", "background-long", "resume", "reconnect", "cancel", "parallel", "parallel-batch", "mixed-failure", "compact", "compact-active", "native-failure"), default="tool")
+    parser.add_argument("--scenario", choices=("tool", "load", "background", "background-long", "resume", "reconnect", "cancel", "parallel", "parallel-batch", "mixed-failure", "compact", "compact-active", "native-failure", "context-isolation"), default="tool")
+    parser.add_argument("--context-topic", choices=("transit", "vista"), default="transit")
     parser.add_argument("--timeout", type=float, default=180)
     parser.add_argument("--load-seconds", type=int, default=30)
     parser.add_argument("--capture-updates", action="store_true", help="Retain private ACP update JSONL for consumer compatibility probes")
