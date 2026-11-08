@@ -110,15 +110,18 @@ The affected sidecar is updated via authenticated drain/shutdown only after heal
 reports zero active HTTP/browser turns and the supervisor reports no DSH clients.
 The existing gateway, router and T3 service need no code changes for this batch.
 
+Rendered T3 file-card verification passed in the user-authorized temporary
+thread; see `acp-consumer-validation-2026-11-08.md` for the exact labels and screenshot.
+The concurrent longer document and PNG workload also passed; see
+`browser-mixed-workload-2026-11-08.md` for response sizes, RSS and validation limits.
+
 ## Still required for the full goal
 
-- Rendered T3 file-card verification passed in the user-authorized temporary
-  thread; see `acp-consumer-validation-2026-11-08.md` for the exact labels and screenshot.
 - Authenticated generated-image live export and fuller interactive-widget handling.
   Actual generated CSV bytes now pass the live check; Chromium image fixtures pass.
-- Broader resource workloads beyond queued tool round trips. Eight-client queued
-  admission now passes, including adaptive capacity and cross-client transport isolation;
-  large-document and image-generation peak memory remain outside that measurement.
+- Resource workloads involving large input documents, native image generation,
+  or saturated mixed work remain unmeasured. Eight-client queued tool admission
+  and a concurrent longer output document plus PNG export now pass.
 
 Do not restart workers while any real ACP session is active. Use health counters,
 supervisor leases, and targeted drain/shutdown; ordinary idle worker shutdown is expected.
