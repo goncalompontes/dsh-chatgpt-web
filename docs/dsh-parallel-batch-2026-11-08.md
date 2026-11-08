@@ -23,11 +23,14 @@ schema limits are enforced, and safe mode excludes the tool. Full validation now
 passes **132 tests, 0 failures, 987 assertions across 25 files**.
 
 The prompt advertises the route only for the native external DSH connector and tells
-the model not to batch dependent work or retry a partially completed batch. A live
-ACP smoke after deployment (`5a889b71-8387-490d-bb48-f79e20b04175`) completed its
-normal tool round trip and the captured browser prompt contained the current
-`dsh_parallel` contract and turn token. It did not itself choose to call the batch
-route; that remains a model-behavior question.
+the model not to batch dependent work or retry a partially completed batch. The
+local-shell MCP dynamic registry was refreshed after deployment (54 to 55 cached
+tools), so its persistent DSH connector now exposes `dsh_parallel`. A live
+model-driven ACP smoke (`417b01ed-0fa7-45b3-a135-52ac89f3faff`) then completed one
+batch request containing two independent reads; both returned as completed `read`
+tool updates and the model replied `DSH_BATCH_OK`. Before the refresh, the same
+prompt failed with `unknown cached tool`, which identified stale connector
+inventory as the integration gap.
 
 The deployed sidecar is PID 1907019, healthy with zero active turns after the smoke.
 The build hashes are CLI `b4a72acd3a3a6d3456fd1b95c5f74c549f87bb9e40722a14ca9af121e2b0b031`

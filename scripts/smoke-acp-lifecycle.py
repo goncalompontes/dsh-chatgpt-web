@@ -81,6 +81,8 @@ async def main(args):
         assert result.get("stopReason") == "end_turn", result
         assert marker in answer.replace("\\_", "_"), answer
         assert required <= {u.get("title") for u in completed}, completed
+        if args.scenario == "parallel-batch":
+            assert sum(u.get("title") == "read" for u in completed) >= 2, completed
         for update in terminal:
             original = started[update["toolCallId"]]
             assert update.get("title") == original["title"], update
@@ -114,6 +116,13 @@ async def main(args):
                 "The cancellation test is over. Use bash exactly once to run `printf DSH_CANCEL_RECOVERED`. "
                 "Then reply DSH_CANCEL_RECOVERED only. Do not modify files or run other commands.",
                 "DSH_CANCEL_RECOVERED", {"bash"},
+            )
+        elif args.scenario == "parallel-batch":
+            await prompt(
+                "Read-only native DSH batch check. Use the dsh connector's dsh_parallel tool exactly once "
+                "with two independent read calls in its calls array: README.md lines 1-3 and package.json lines 1-3. "
+                "Do not call read directly and do not use any other tool. After the batch succeeds reply DSH_BATCH_OK only.",
+                "DSH_BATCH_OK", {"read"},
             )
         elif args.scenario == "parallel":
             start = len(updates)
@@ -284,7 +293,7 @@ if __name__ == "__main__":
     parser.add_argument("--dsh", default=shutil.which("dsh") or str(Path.home() / ".local/bin/dsh"))
     parser.add_argument("--cwd", default=str(Path.cwd()))
     parser.add_argument("--model", default="chatgpt-web/gpt-6-light")
-    parser.add_argument("--scenario", choices=("tool", "load", "background", "resume", "reconnect", "cancel", "parallel", "mixed-failure", "compact", "compact-active", "native-failure"), default="tool")
+    parser.add_argument("--scenario", choices=("tool", "load", "background", "resume", "reconnect", "cancel", "parallel", "parallel-batch", "mixed-failure", "compact", "compact-active", "native-failure"), default="tool")
     parser.add_argument("--timeout", type=float, default=180)
     parser.add_argument("--capture-updates", action="store_true", help="Retain private ACP update JSONL for consumer compatibility probes")
     asyncio.run(main(parser.parse_args()))
