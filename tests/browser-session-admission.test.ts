@@ -26,6 +26,61 @@ function mockRuntime() {
 const microtasks = async () => { await Promise.resolve(); await Promise.resolve(); await Promise.resolve(); };
 
 describe("native session admission", () => {
+  test("a new native checkpoint retires its waiting predecessor without replay or premature admission", async () => {
+    const sessions = new ChatGptTurnSessions();
+    const first = mockRuntime();
+    let cancellations = 0;
+    first.runtime.cancel = () => { cancellations++; first.browser.resolve("cancelled"); };
+    await sessions.getOrCreateAfterOwnerRetirement("old", "owner", () => first.runtime,
+      undefined, undefined, "dsh-turn-2", "dsh-session");
+    const next = mockRuntime();
+    let starts = 0;
+    const replacement = sessions.getOrCreateAfterOwnerRetirement("checkpoint", "owner", () => {
+      starts++; return next.runtime;
+    }, undefined, undefined, "dsh-turn-2", "dsh-session", "new-checkpoint");
+    await microtasks();
+    expect(cancellations).toBe(1);
+    expect(starts).toBe(0);
+    first.physical.resolve();
+    await replacement;
+    expect(starts).toBe(1);
+    await expect(sessions.getOrCreateAfterOwnerRetirement("old", "owner", () => first.runtime,
+      undefined, undefined, "dsh-turn-2", "dsh-session")).rejects.toThrow("superseded checkpoint");
+    const sameEpoch = new AbortController();
+    const steering = sessions.getOrCreateAfterOwnerRetirement("steering", "owner", () => first.runtime,
+      undefined, sameEpoch.signal, "dsh-turn-2", "dsh-session", "new-checkpoint");
+    await microtasks();
+    expect((await replacement).isPhysicallySettled()).toBe(false);
+    sameEpoch.abort();
+    await expect(steering).rejects.toMatchObject({ name: "AbortError" });
+    next.runtime.cancel();
+    await microtasks();
+    await expect(sessions.getOrCreateAfterOwnerRetirement("old", "owner", () => first.runtime,
+      undefined, undefined, "dsh-turn-2", "dsh-session")).rejects.toThrow("superseded checkpoint");
+  });
+
+  test("checkpoint retirement survives cancellation of the request that initiated it", async () => {
+    const sessions = new ChatGptTurnSessions();
+    const first = mockRuntime();
+    first.runtime.cancel = () => { first.browser.resolve("cancelled"); };
+    await sessions.getOrCreateAfterOwnerRetirement("old-a", "owner-a", () => first.runtime,
+      undefined, undefined, "dsh-turn-2", "dsh-session-a", "checkpoint-a");
+    const next = mockRuntime();
+    const abort = new AbortController();
+    const abandoned = sessions.getOrCreateAfterOwnerRetirement("new-b", "owner-a", () => next.runtime,
+      undefined, abort.signal, "dsh-turn-2", "dsh-session-a", "checkpoint-b");
+    await microtasks();
+    abort.abort();
+    await expect(abandoned).rejects.toMatchObject({ name: "AbortError" });
+    const replacement = sessions.getOrCreateAfterOwnerRetirement("new-b", "owner-a", () => next.runtime,
+      undefined, undefined, "dsh-turn-2", "dsh-session-a", "checkpoint-b");
+    first.physical.resolve();
+    await replacement;
+    await expect(sessions.getOrCreateAfterOwnerRetirement("old-a", "owner-a", () => first.runtime,
+      undefined, undefined, "dsh-turn-2", "dsh-session-a", "checkpoint-a")).rejects.toThrow("superseded checkpoint");
+    next.runtime.cancel();
+  });
+
   test("an exact DSH interrupt frees its pending owner without cancelling another turn", async () => {
     const sessions = new ChatGptTurnSessions();
     const first = mockRuntime();

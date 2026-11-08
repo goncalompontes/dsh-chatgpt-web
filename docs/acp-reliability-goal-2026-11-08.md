@@ -3,6 +3,8 @@
 This follows `t3-turn-errors-2026-11-08.md` and the referenced investigation at
 <t3-thread://v2/22dc85a4-1f2f-48de-93f3-f1f80482d218/8ffb2d4d-d99c-4ac2-8e54-51b60606b53f>.
 The goal remains active. The fixes below do not establish that every remaining issue is resolved.
+See `acp-live-validation-2026-11-08.md` for subsequent native checkpoint, transport-loss,
+six-client load and real downloaded-file evidence, plus the active-turn compaction fix.
 
 ## Implemented
 
@@ -82,14 +84,15 @@ it with admission counters. One active browser tree was about 1.9 GiB; a later
 conversation pages. RSS sums double-count shared pages; these are process-tree
 observations, not calibrated incremental per-turn costs. The provisional 768 MiB
 allowance is replaced with a conservative 3 GiB allowance. The hard cap remains five
-and the reserve remains 4 GiB. Full concurrent peak-load calibration remains open.
+and the reserve remains 4 GiB. A subsequent six-client queued load check passed;
+its measured peak and workload limits are recorded in the follow-up validation document.
 The live two-session check also exercised queued admission: health reported three
 admitted browser executions and 19,897 ms maximum/total queue wait, with no pending
 or active turns after cleanup. This validates live metric wiring, not saturated load.
 
 ## Verification and deployment
 
-Final regression run: **121 passed, 0 failed, 914 assertions across 23 files**.
+Initial regression run: **121 passed, 0 failed, 914 assertions across 23 files**.
 TypeScript, build, whitespace checks and the clean-tarball smoke passed. The tarball
 check includes clean installation, CLI/doctor startup, dependency loading, and absence
 of build-environment paths.
@@ -104,12 +107,13 @@ The existing gateway, router and T3 service need no code changes for this batch.
 ## Still required for the full goal
 
 - Verify the ACP presentation in the T3 UI, in addition to native protocol evidence.
-- Downloaded artifact bytes, authenticated image export, and fuller interactive-widget handling.
-- A live parallel dispatch with observed overlapping tools, broader mixed failure ordering,
-  and reconnect after transport loss rather than only explicit close/resume.
-- Live post-compaction reproduction and trace correlation. The reported timeout mechanism
-  remains unproven; current tests cover checkpoint recovery and continuation identity.
-- Concurrent peak-load resource calibration and a live queue/latency run under pressure.
+- Authenticated generated-image live export and fuller interactive-widget handling.
+  Actual generated CSV bytes now pass the live check; Chromium image fixtures pass.
+- A live parallel dispatch with observed overlapping tools. Mixed failure ordering passes
+  the socket regression; reconnect after complete transport loss now passes natively.
+- Extend checkpoint coverage beyond the successful active-turn and idle native checks.
+  The follow-up document records the reproduced deadlock, model replay, and verified fixes.
+- Broader load workloads beyond the successful six-client queued tool round trip.
 
 Do not restart workers while any real ACP session is active. Use health counters,
 supervisor leases, and targeted drain/shutdown; ordinary idle worker shutdown is expected.

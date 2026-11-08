@@ -238,15 +238,19 @@ test("simultaneous MCP invocations become distinct named DSH tool calls", async 
       arguments: { command: "echo first" } });
     const second = callTurnBroker(broker.socketPath, { method: "invoke", bindingId, wireName: "glob",
       arguments: { pattern: "*.ts" } });
+    const third = callTurnBroker(broker.socketPath, { method: "invoke", bindingId, wireName: "read",
+      arguments: { file_path: "missing-file" } });
     const batch = await waiting;
-    expect(batch).toHaveLength(2);
-    expect(batch.map(tool => tool.wireName)).toEqual(["bash", "glob"]);
-    expect(new Set(batch.map(tool => tool.callId)).size).toBe(2);
+    expect(batch).toHaveLength(3);
+    expect(batch.map(tool => tool.wireName)).toEqual(["bash", "glob", "read"]);
+    expect(new Set(batch.map(tool => tool.callId)).size).toBe(3);
     // A batch can complete out of order without mixing tool identities or receipts.
+    broker.completeTool(token, batch[2]!.callId, { isError: true, content: [{ type: "text", text: "file not found" }] });
     broker.completeTool(token, batch[1]!.callId, { content: [{ type: "text", text: "glob-result" }] });
     broker.completeTool(token, batch[0]!.callId, { content: [{ type: "text", text: "bash-result" }] });
     expect(await first).toMatchObject({ content: [{ text: "bash-result" }] });
     expect(await second).toMatchObject({ content: [{ text: "glob-result" }] });
+    expect(await third).toMatchObject({ isError: true, content: [{ text: "file not found" }] });
   } finally {
     await broker.close();
     rmSync(dir, { recursive: true, force: true });

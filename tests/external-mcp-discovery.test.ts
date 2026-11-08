@@ -30,3 +30,18 @@ test("compaction never receives the DSH inventory or discovery instructions", ()
   expect(prompt).not.toContain("<dsh_tool_inventory_json>");
   expect(prompt).not.toContain("mcp_tool_search");
 });
+
+test("a fresh browser with recorded tool results resumes remaining work instead of restarting", () => {
+  const parsed = parseRequest({ model: "gpt-6", input: [
+    { role: "user", content: "Run the marker command, then read README.md" },
+    { role: "user", content: "Turn checkpoint: Pending: run the marker command, then read README.md" },
+    { type: "function_call", call_id: "before-checkpoint", name: "bash", arguments: '{"command":"printf DONE"}' },
+    { type: "function_call_output", call_id: "before-checkpoint", output: "DONE" },
+  ] });
+  const prompt = compileChatGptWebPrompt(parsed, capabilities, "turn_after_checkpoint");
+  const context = JSON.parse(prompt.text.split("<codex_context_json>\n")[1]!.split("\n</codex_context_json>")[0]!);
+  expect(context.messages.at(-1)).toMatchObject({ role: "tool_result", tool_call_id: "before-checkpoint" });
+  expect(prompt.awaitingToolResultAnswer).toBe(true);
+  expect(prompt.text.split("<dsh_transport_resume>")[1]).toContain("The last tool has already executed");
+  expect(prompt.text.split("<dsh_transport_resume>")[1]).not.toContain("Execute the latest active user request now");
+});

@@ -280,6 +280,8 @@ export function chatGptCompactionSourceExecutionKey(parsed: CodexParsedRequest):
 }
 
 export class ChatGptTurnSession {
+  /** Prevent delayed requests from rolling a live native turn back to a retired checkpoint. */
+  readonly supersededCheckpointKeys = new Set<string>();
   readonly createdAt = Date.now();
   private lastTouchedAt = this.createdAt;
   readonly browserOutcome: Promise<ChatGptBrowserOutcome>;
@@ -308,6 +310,7 @@ export class ChatGptTurnSession {
     readonly ownerKey?: string,
     readonly nativeTurnId?: string,
     readonly nativeThreadId?: string,
+    readonly dshCheckpointEpoch?: string,
   ) {
     this.attachedConversationKey = runtime.conversationKey;
     this.physicalSettlement = runtime.physicalSettlement.then(
@@ -510,6 +513,7 @@ export class ChatGptTurnSessions {
   private readonly conversationHeads = new Map<string, ChatGptTurnSession>();
   private readonly retirements = new Map<string, Promise<void>>();
   private readonly ownerRetirements = new Map<string, Promise<void>>();
+  private readonly checkpointPredecessors = new Map<string, { keys: Set<string>; updatedAt: number }>();
   private readonly conversationRetirements = new Map<string, Promise<void>>();
   private readonly admission = new ChatGptBrowserAdmission(MAX_CHATGPT_BROWSER_TABS);
   private readonly capacityMonitor?: BrowserAdmissionCapacityMonitor;
@@ -533,6 +537,7 @@ export class ChatGptTurnSessions {
     ownerKey?: string,
     nativeTurnId?: string,
     nativeThreadId?: string,
+    dshCheckpointEpoch?: string,
   ): ChatGptTurnSession {
     this.prune();
     const existing = this.entries.get(key);
@@ -547,7 +552,7 @@ export class ChatGptTurnSessions {
       );
     }
     if (this.entries.size >= this.maxEntries) throw new Error(`ChatGPT web session registry is full (${this.maxEntries} entries)`);
-    const session = new ChatGptTurnSession(start(), traceId, ownerKey, nativeTurnId, nativeThreadId);
+    const session = new ChatGptTurnSession(start(), traceId, ownerKey, nativeTurnId, nativeThreadId, dshCheckpointEpoch);
     this.entries.set(key, session);
     const conversationKey = session.conversationKey();
     if (conversationKey) this.conversationHeads.set(conversationKey, session);
@@ -562,9 +567,17 @@ export class ChatGptTurnSessions {
     signal?: AbortSignal,
     nativeTurnId?: string,
     nativeThreadId?: string,
+    dshCheckpointEpoch?: string,
   ): Promise<ChatGptTurnSession> {
+    const checkpointOwner = JSON.stringify([ownerKey, nativeThreadId, nativeTurnId]);
     for (;;) {
       if (signal?.aborted) throw new DOMException("ChatGPT web turn aborted", "AbortError");
+      if (this.checkpointPredecessors.get(checkpointOwner)?.keys.has(key)) throw new Error("DSH request refers to a superseded checkpoint execution");
+      if ([...this.entries.values()].some(session => session.ownerKey === ownerKey
+        && session.nativeThreadId === nativeThreadId && session.nativeTurnId === nativeTurnId
+        && session.supersededCheckpointKeys.has(key))) {
+        throw new Error("DSH request refers to a superseded checkpoint execution");
+      }
       const existing = this.entries.get(key);
       if (existing) {
         existing.touch();
@@ -579,11 +592,34 @@ export class ChatGptTurnSessions {
         ownedKey !== key && session.ownerKey === ownerKey && !session.isPhysicallySettled()
       ));
       if (activeOwner) {
-        const [, ownedSession] = activeOwner;
+        const [ownedKey, ownedSession] = activeOwner;
+        if (ownedSession.supersededCheckpointKeys.has(key)) throw new Error("DSH request refers to a superseded checkpoint execution");
+        if (dshCheckpointEpoch && nativeTurnId && nativeThreadId
+          && ownedSession.nativeTurnId === nativeTurnId && ownedSession.nativeThreadId === nativeThreadId
+          && ownedSession.dshCheckpointEpoch !== dshCheckpointEpoch) {
+          // Native compaction can replace history after a tool ran but before its
+          // result reaches this waiting browser. That execution can never finish
+          // normally. Retire its capability and wait for physical cleanup before
+          // opening the new checkpoint; never re-invoke its delivered tool.
+          if (ownedSession.supersededCheckpointKeys.size >= 1024) throw new Error("DSH checkpoint transition limit reached");
+          for (const [owner, pending] of this.checkpointPredecessors) {
+            if (pending.updatedAt < Date.now() - this.ttlMs) this.checkpointPredecessors.delete(owner);
+          }
+          if (!this.checkpointPredecessors.has(checkpointOwner) && this.checkpointPredecessors.size >= this.maxEntries) {
+            throw new Error("DSH checkpoint retirement registry is full");
+          }
+          this.checkpointPredecessors.set(checkpointOwner, {
+            keys: new Set([...ownedSession.supersededCheckpointKeys, ownedKey]), updatedAt: Date.now(),
+          });
+          this.entries.delete(ownedKey);
+          this.forgetConversationHead(ownedSession);
+          await awaitWithAbort(this.beginRetirement(ownedKey, ownedSession), signal);
+          continue;
+        }
         // A different native message for the same thread is sequential work, not permission to
         // kill the response already using that retained conversation. Wait for its complete
-        // browser/launcher settlement; explicit tab close and lifecycle cancellation remain the
-        // only paths that preempt an active owner.
+        // browser/launcher settlement. Only an explicit lifecycle operation or the
+        // same-turn checkpoint transition above may preempt an active owner.
         // A failed launcher teardown has still physically settled. Do not poison the next
         // native owner's admission with the previous helper's cleanup error.
         await awaitWithAbort(ownedSession.physicalSettlement.then(() => {}, () => {}), signal);
@@ -605,7 +641,21 @@ export class ChatGptTurnSessions {
         if (competingOwner || this.ownerRetirements.has(ownerKey) || this.retirements.has(key)) {
           continue;
         }
-        const session = this.getOrCreate(key, start, traceId, ownerKey, nativeTurnId, nativeThreadId);
+        // Admission may have waited while another request replaced this checkpoint.
+        if (this.checkpointPredecessors.get(checkpointOwner)?.keys.has(key)
+          || [...this.entries.values()].some(session => session.ownerKey === ownerKey
+            && session.nativeThreadId === nativeThreadId && session.nativeTurnId === nativeTurnId
+            && session.supersededCheckpointKeys.has(key))) {
+          throw new Error("DSH request refers to a superseded checkpoint execution");
+        }
+        const session = this.getOrCreate(key, start, traceId, ownerKey, nativeTurnId, nativeThreadId, dshCheckpointEpoch);
+        // Keep the transition journal on the registry until a replacement really
+        // starts: the request initiating retirement may be cancelled while draining.
+        const predecessors = this.checkpointPredecessors.get(checkpointOwner);
+        if (predecessors) {
+          for (const previous of predecessors.keys) session.supersededCheckpointKeys.add(previous);
+          this.checkpointPredecessors.delete(checkpointOwner);
+        }
         // A lease outlives the logical response until the browser/helper physically settles.
         void session.physicalSettlement.then(release, release);
         transferred = true;

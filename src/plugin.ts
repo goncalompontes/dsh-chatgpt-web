@@ -112,7 +112,7 @@ export function apply(ctx: CordisContext, config: ChatGPTWebPluginConfig = {}): 
   const turns = new Map<string, number>();
   const sidecarTurns = new Map<string, number>();
 
-  // Cancellation can happen between provider requests, after a tool was delivered.
+  // Cancellation or native failure can happen between requests, after tool delivery.
   // No HTTP stream exists then to carry an abort. Forward the producer's exact turn
   // identity so a delayed interrupt cannot cancel the next turn or another session.
   ctx.on?.("session/event", (session, event) => {
@@ -125,7 +125,7 @@ export function apply(ctx: CordisContext, config: ChatGPTWebPluginConfig = {}): 
     const turn = sidecarTurns.get(sessionId);
     if (turn === undefined || turn !== event.data?.turn) return;
     sidecarTurns.delete(sessionId);
-    if (event.data?.reason?.kind !== "aborted") return;
+    if (!["aborted", "error", "blocked", "max-tokens"].includes(event.data?.reason?.kind)) return;
     return (async () => {
       try {
         const response = await fetch(`http://${host}:${port}/admin/interrupt-turn`, {
@@ -135,7 +135,7 @@ export function apply(ctx: CordisContext, config: ChatGPTWebPluginConfig = {}): 
         });
         if (!response.ok) throw new Error(`sidecar returned HTTP ${response.status}`);
       } catch (error) {
-        logger.warn(`[dsh-chatgpt-web] Could not forward turn cancellation: ${error instanceof Error ? error.message : String(error)}`);
+        logger.warn(`[dsh-chatgpt-web] Could not forward turn termination: ${error instanceof Error ? error.message : String(error)}`);
       }
     })();
   });

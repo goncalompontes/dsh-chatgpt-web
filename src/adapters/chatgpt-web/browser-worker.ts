@@ -17,6 +17,7 @@ import {
 } from "../../config";
 import { estimateTokens } from "../../lib/token-estimate";
 import { ManagedConversationPool } from "./managed-conversation";
+import { captureChatGptMedia } from "./media";
 import type { ChatGptExternalMcpConfig, CodexProviderConfig } from "../../types";
 import { parseDataUrl } from "../image";
 import {
@@ -5561,6 +5562,18 @@ export class ChatGptBrowserWorker {
               finalText = completed.answer;
             } else {
               finalText = final.markdown;
+            }
+            const media = await withBrowserTurnAbort(
+              captureChatGptMedia(responseTurn.locator, join(getConfigDir(), "artifacts"), turn.abortSignal), turn.abortSignal,
+            )
+              .catch(error => {
+                if (turn.abortSignal?.aborted) throw error;
+                console.warn(`[chatgpt-web] media export unavailable trace=${turn.traceId}`);
+                return "";
+              });
+            if (media) {
+              turn.onTextDelta(media);
+              finalText += media;
             }
             break;
           }

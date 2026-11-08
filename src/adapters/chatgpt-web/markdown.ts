@@ -45,6 +45,10 @@ turndown.addRule("chatGptCodeBlock", {
   },
 });
 turndown.remove(["button", "script", "style", "noscript", "iframe"]);
+turndown.addRule("chatGptEphemeralAttachments", {
+  filter: node => node.nodeName === "A" && /^(?:sandbox:|blob:|data:)/i.test((node as HTMLElement).getAttribute("href") ?? ""),
+  replacement: content => `${content || "Attachment"} (attachment in ChatGPT)`,
+});
 // Preserve image references when a browser-exposed, absolute HTTPS/HTTP URL is available.
 // Embedded data URLs and blob URLs are intentionally not copied into model text: the former
 // could inline megabytes and the latter are inaccessible outside the ephemeral browser page.

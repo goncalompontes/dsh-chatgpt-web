@@ -1,5 +1,6 @@
 import { createHash, randomBytes } from "node:crypto";
 import { estimateTokens } from "../../lib/token-estimate";
+import { dshCompactionEpoch } from "../../responses/dsh-context";
 import { resolve } from "node:path";
 import { isChatGptWebZeroRiskBackendModel, resolveChatGptWebContextLimits, type ChatGptWebBackendModel } from "../../chatgpt-web-models";
 import { defaultBrokerEndpoint, expandUserPath, resolveBrokerEndpoint } from "../../config";
@@ -1284,6 +1285,7 @@ export function createChatGptWebAdapter(
           incoming.abortSignal,
           nativeTurnId,
           nativeIdentity.threadId,
+          dshCompactionEpoch(parsed),
         );
         let roundInputAccounting: ChatGptWebInputAccounting | undefined;
         const roundUsage = (evidence: ChatGptWebRoundEvidence): CodexUsage => estimateChatGptWebUsage(

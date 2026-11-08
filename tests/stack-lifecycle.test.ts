@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { apply } from "../src/plugin";
 import { defaultConfig } from "../src/config";
 
-test("DSH explicit cancellation forwards only the exact turn sent to this sidecar", async () => {
+test("DSH unsuccessful termination forwards only the exact turn sent to this sidecar", async () => {
   const root = mkdtempSync(join(tmpdir(), "dsh-cancel-plugin-"));
   const previous = process.env.DSH_CHATGPT_WEB_HOME;
   const previousFree = process.env.DSH_CHATGPT_FREE_HOME;
@@ -14,11 +14,11 @@ test("DSH explicit cancellation forwards only the exact turn sent to this sideca
   const config = defaultConfig();
   writeFileSync(join(root, "config.json"), JSON.stringify(config));
   const calls: Array<{ url: string; body: any }> = [];
-  const fetchSpy = spyOn(globalThis, "fetch").mockImplementation(async (url: any, options: any) => {
+  const fetchSpy = spyOn(globalThis, "fetch").mockImplementation((async (url: any, options: any) => {
     expect(options.headers.Authorization).toBe(`Bearer ${config.controlToken}`);
     calls.push({ url: String(url), body: JSON.parse(options.body) });
     return Response.json({ status: "ok" });
-  });
+  }) as typeof fetch);
   try {
     const hooks = new Map<string, (...args: any[]) => any>();
     apply({ on: (name, callback) => hooks.set(name, callback), effect: () => {} }, { autoStart: false });
@@ -43,6 +43,14 @@ test("DSH explicit cancellation forwards only the exact turn sent to this sideca
     await end("other-provider", 1);
     await end("session-a", 2, "completed");
     expect(calls).toHaveLength(1);
+    for (const kind of ["error", "blocked", "max-tokens"]) {
+      start("session-a", 3);
+      request("session-a");
+      await end("session-a", 3, kind);
+      await end("session-a", 3, kind); // duplicate terminal event is idempotent
+      expect(calls.at(-1)?.body).toEqual({ threadId: "dsh-session-a", turnId: "dsh-turn-3" });
+    }
+    expect(calls).toHaveLength(4);
   } finally {
     fetchSpy.mockRestore();
     if (previous === undefined) delete process.env.DSH_CHATGPT_WEB_HOME;

@@ -13,9 +13,24 @@ async def main(args):
     sequence = 0
     session = None
     cancel_on_tool = False
+    observer = None
+    observer_dir = tempfile.TemporaryDirectory(prefix="dsh-lifecycle-observer-") if args.scenario in ("compact", "compact-active", "native-failure") else None
+    launch_args = [args.dsh, "--profile", "acp"]
+    if observer_dir:
+        directory = Path(observer_dir.name)
+        observer = directory / "control.sock"
+        fixture = Path(__file__).resolve().parent / "fixtures/dsh-lifecycle-observer.mjs"
+        overlay = directory / "overlay.yml"
+        # JSON values are also valid YAML scalar values.
+        overlay.write_text("- insert:\n    - id: lifecycle-smoke-observer\n      name: " + json.dumps(str(fixture))
+                           + "\n      config:\n        socket: " + json.dumps(str(observer))
+                           + "\n        events: " + json.dumps(str(directory / "events.jsonl"))
+                           + "\n        activeCompaction: " + str(args.scenario == "compact-active").lower()
+                           + "\n        activeFailure: " + str(args.scenario == "native-failure").lower() + "\n")
+        launch_args += ["--patch", str(overlay)]
     with tempfile.NamedTemporaryFile(prefix="dsh-acp-smoke-", suffix=".log", delete=False) as log:
         process = await asyncio.create_subprocess_exec(
-            args.dsh, "--profile", "acp", cwd=args.cwd,
+            *launch_args, cwd=args.cwd,
             stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=log,
         )
 
@@ -74,6 +89,8 @@ async def main(args):
                                     "clientInfo": {"name": "dsh-lifecycle-smoke", "version": "1"}})
         created = await request("session/new", {"cwd": args.cwd, "mcpServers": []})
         session = created["sessionId"]
+        if observer and not observer.exists():
+            raise RuntimeError(f"Smoke observer was not mounted; inspect {log.name}")
         model = next(option for option in created["configOptions"] if option.get("category") == "model")
         await request("session/set_config_option", {
             "sessionId": session, "configId": model["id"],
@@ -120,12 +137,97 @@ async def main(args):
             assert any(u.get("title") == "bash" and u.get("rawInput", {}).get("run_in_background") is True
                        for u in started.values()), started
         else:
+            # Give native summarization enough compressible history to satisfy its
+            # strict smaller-than-source requirement before testing checkpoint recovery.
+            command = ("sleep 30; printf DSH_ACP_OK" if args.scenario == "load" else
+                       "printf 'DSH_COMPACTION_SEED_%04d\\n' {1..128}; printf DSH_ACP_OK"
+                       if args.scenario in ("compact", "compact-active") else "printf DSH_ACP_OK")
             await prompt(
-                "This is a read-only lifecycle smoke check. Use bash exactly once to run `printf DSH_ACP_OK`. "
+                "This is a read-only lifecycle smoke check. Use bash exactly once to run "
+                + f"`{command}`. " +
                 "Then reply DSH_ACP_OK only. Do not modify files or run any other commands.", "DSH_ACP_OK", {"bash"},
             )
-            if args.scenario == "resume":
-                await request("session/close", {"sessionId": session})
+            if args.scenario == "native-failure":
+                try:
+                    await prompt(
+                        "Read-only failure cleanup check. Use bash exactly once to run `printf DSH_BEFORE_NATIVE_FAILURE`. "
+                        "Then reply DSH_BEFORE_NATIVE_FAILURE. Do not modify files or run other commands.",
+                        "DSH_BEFORE_NATIVE_FAILURE", {"bash"},
+                    )
+                except RuntimeError as error:
+                    assert "DSH_SMOKE_INJECTED_NATIVE_FAILURE" in str(error), str(error)
+                else:
+                    raise AssertionError("The native failure hook did not run")
+                started = await prompt(
+                    "The failure test is over. Use bash exactly once to run `printf DSH_NATIVE_RECOVERED`. "
+                    "Then reply DSH_NATIVE_RECOVERED only. Do not modify files or run other commands.",
+                    "DSH_NATIVE_RECOVERED", {"bash"},
+                )
+                assert len(started) == 1, started
+            elif args.scenario == "compact-active":
+                started = await prompt(
+                    "This is an active-turn compaction check. First use bash to run `printf DSH_BEFORE_CHECKPOINT`. "
+                    "Then use read to inspect README.md lines 1-3. After both tools finish reply DSH_ACTIVE_COMPACT_OK only. "
+                    "Do not modify files or run other commands.", "DSH_ACTIVE_COMPACT_OK", {"bash", "read"},
+                )
+                assert sorted(call["title"] for call in started.values()) == ["bash", "read"], started
+                evidence = Path(observer_dir.name) / "events.jsonl"
+                events = [json.loads(line) for line in evidence.read_text().splitlines()]
+                checkpoint = next(event for event in events if event["type"] == "compaction/summary")
+                ended = next(event for event in events if event["type"] == "compaction/end")
+                assert checkpoint["shadowedItems"] > 0 and ended.get("turn") == 2, events
+                calls = [event for event in events if event["type"] == "tool/call" and event["seq"] > ended["seq"]]
+                results = [event for event in events if event["type"] == "tool/result" and event["seq"] > ended["seq"]]
+                assert calls and {event["callId"] for event in calls} == {event["callId"] for event in results}, events
+                assert not any(event["isError"] for event in results), results
+                print(json.dumps({"activeCompaction": checkpoint, "events": log.name + ".events.jsonl"}), flush=True)
+            elif args.scenario == "compact":
+                reader, writer = await asyncio.open_unix_connection(str(observer))
+                try:
+                    writer.write((json.dumps({"operation": "compact", "sessionId": session}) + "\n").encode())
+                    await writer.drain()
+                    async with asyncio.timeout(args.timeout):
+                        compacted = json.loads(await reader.readline())
+                    assert compacted.get("ok") and compacted.get("shadowedItems", 0) > 0, compacted
+                    print(json.dumps({"compaction": compacted, "session": session}), flush=True)
+                finally:
+                    writer.close()
+                    await writer.wait_closed()
+                await prompt(
+                    "This is the post-compaction read-only check. Use bash exactly once to run `printf DSH_COMPACTED_OK`. "
+                    "Then reply DSH_COMPACTED_OK only. Do not modify files or run other commands.",
+                    "DSH_COMPACTED_OK", {"bash"},
+                )
+                evidence = Path(observer_dir.name) / "events.jsonl"
+                events = [json.loads(line) for line in evidence.read_text().splitlines()]
+                checkpoint = next(event for event in events if event["type"] == "compaction/summary")
+                ended = next(event for event in events if event["type"] == "compaction/end")
+                assert checkpoint["shadowedItems"] > 0 and ended["seq"] > checkpoint["seq"], events
+                calls = [event for event in events if event["type"] == "tool/call" and event["seq"] > ended["seq"]]
+                results = [event for event in events if event["type"] == "tool/result" and event["seq"] > ended["seq"]]
+                assert calls and {event["callId"] for event in calls} == {event["callId"] for event in results}, events
+                assert not any(event["isError"] for event in results), results
+                destination = Path(log.name + ".events.jsonl")
+                shutil.copyfile(evidence, destination)
+                print(json.dumps({"events": str(destination)}), flush=True)
+            elif args.scenario in ("resume", "reconnect"):
+                if args.scenario == "reconnect":
+                    previous_pid = process.pid
+                    # Lose the entire ACP transport without session/close, then attach
+                    # through a fresh native host to the same persisted session.
+                    process.stdin.close()
+                    await asyncio.wait_for(process.wait(), 20)
+                    with open(log.name, "ab") as stderr:
+                        process = await asyncio.create_subprocess_exec(
+                            *launch_args, cwd=args.cwd, stdin=asyncio.subprocess.PIPE,
+                            stdout=asyncio.subprocess.PIPE, stderr=stderr,
+                        )
+                    await request("initialize", {"protocolVersion": 1, "clientCapabilities": {},
+                                                 "clientInfo": {"name": "dsh-reconnect-smoke", "version": "1"}})
+                    print(json.dumps({"transportLost": previous_pid, "reconnected": process.pid,
+                                      "session": session}), flush=True)
+                else:
+                    await request("session/close", {"sessionId": session})
                 await request("session/resume", {"sessionId": session, "cwd": args.cwd, "mcpServers": []})
                 await prompt(
                     "This is the resumed read-only check. Use bash exactly once to run `printf DSH_RESUMED_OK`. "
@@ -149,6 +251,11 @@ async def main(args):
             except asyncio.TimeoutError:
                 process.kill()
                 await process.wait()
+        if observer_dir:
+            evidence = Path(observer_dir.name) / "events.jsonl"
+            if evidence.exists():
+                shutil.copyfile(evidence, Path(log.name + ".events.jsonl"))
+            observer_dir.cleanup()
 
 
 if __name__ == "__main__":
@@ -156,6 +263,6 @@ if __name__ == "__main__":
     parser.add_argument("--dsh", default=shutil.which("dsh") or str(Path.home() / ".local/bin/dsh"))
     parser.add_argument("--cwd", default=str(Path.cwd()))
     parser.add_argument("--model", default="chatgpt-web/gpt-6-light")
-    parser.add_argument("--scenario", choices=("tool", "background", "resume", "cancel", "parallel"), default="tool")
+    parser.add_argument("--scenario", choices=("tool", "load", "background", "resume", "reconnect", "cancel", "parallel", "compact", "compact-active", "native-failure"), default="tool")
     parser.add_argument("--timeout", type=float, default=180)
     asyncio.run(main(parser.parse_args()))
