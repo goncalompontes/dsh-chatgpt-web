@@ -78,6 +78,8 @@ dsh plugin --profile <profile> add github:WLV-ZEDD/dsh-chatgpt-web
 
 This registers the plugin in the profile's `package.json` bundles, so its Cordis entries are composed automatically — no manual `insert` is needed.
 
+Install it in every profile that uses this provider. For T3's DSH ACP integration, use `--profile acp`; installing only in `dsh-tui` does not load the plugin in ACP. The plugin passes DSH session identity and request purpose to the sidecar, allowing persistent chat reuse and text checkpoint recovery. Restart the relevant DSH client after changing its profile; existing sessions can still recover through compatibility handling for the native DSH compaction request.
+
 ### 2. One-Time Browser Sign-In
 
 Authenticate your ChatGPT account once. The plugin binary lives in the profile's `node_modules/.bin`:

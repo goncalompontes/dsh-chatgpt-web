@@ -1,5 +1,9 @@
 import type { Locator, Page } from "playwright-core";
-import type { ChatGptWebAccountCapabilities } from "./chatgpt-web-models";
+import { ChatGptWebAdapterError } from "./adapters/chatgpt-web/adapter-error";
+import {
+  CHATGPT_WEB_MODEL_ROW_LABELS,
+  type ChatGptWebAccountCapabilities,
+} from "./chatgpt-web-models";
 
 export const CHATGPT_TEMPORARY_CHAT_URL = "https://chatgpt.com/?temporary-chat=true";
 export const CHATGPT_COMPOSER_SELECTOR = [
@@ -44,12 +48,14 @@ export const CHATGPT_ASSISTANT_TURN_SELECTOR = [
   '[data-testid^="conversation-turn-"][data-message-author-role="assistant"]',
   '[data-testid^="conversation-turn-"]:has([data-message-author-role="assistant"])',
   '[data-chatgpt-search-unit-key$=":assistant"]',
+  '[data-content-search-unit-key$=":assistant"]',
 ].join(", ");
 export const CHATGPT_USER_TURN_SELECTOR = [
   '[data-testid^="conversation-turn-"][data-turn="user"]',
   '[data-testid^="conversation-turn-"][data-message-author-role="user"]',
   '[data-testid^="conversation-turn-"]:has([data-message-author-role="user"])',
   '[data-chatgpt-search-unit-key$=":user"]',
+  '[data-content-search-unit-key$=":user"]',
 ].join(", ");
 
 export interface ChatGptEffortSliderState {
@@ -59,9 +65,17 @@ export interface ChatGptEffortSliderState {
 }
 
 export interface ChatGptEffortActivation {
-  method: "already-open" | "click" | "pointerdown";
+  method: "already-open" | "keyboard" | "click" | "pointerdown";
   menu: Locator;
   slider: Locator;
+}
+
+export interface ChatGptModelRowSelection {
+  status: "selected" | "already-selected" | "not-applicable" | "unavailable" | "unconfirmed";
+  label: string;
+  availableLabels: string[];
+  /** Picker menu after selection; it may have been reopened if selecting a row closed it. */
+  menu: Locator;
 }
 
 function effortMenuSelectorForId(menuId: string): string {
@@ -118,6 +132,20 @@ export async function activateChatGptEffortMenu(
 
   const settleMs = options.settleMs ?? 3_000;
   await clearGhostEffortState(page, control);
+
+  // Prefer a semantic keyboard activation before any pointer input: pointer coordinates break
+  // easily when ChatGPT overlays or re-renders the composer mid-turn.
+  const keyboardFocused = await control.focus().then(
+    () => control.evaluate(element => element === document.activeElement).catch(() => false),
+    () => false,
+  );
+  if (keyboardFocused) {
+    await control.press("Enter").catch(() => {});
+    const keyboardSurface = await waitForEffortSurface(page, control, settleMs);
+    if (keyboardSurface) return { method: "keyboard", ...keyboardSurface };
+    await clearGhostEffortState(page, control);
+  }
+
   await control.click({ force: true, timeout: Math.max(1, settleMs) });
   const clickedSurface = await waitForEffortSurface(page, control, settleMs);
   if (clickedSurface) return { method: "click", ...clickedSurface };
@@ -134,6 +162,208 @@ export async function activateChatGptEffortMenu(
   throw new Error(
     "ChatGPT effort control did not expose its owned menu or structural slider after click and primary pointerdown",
   );
+}
+
+function normalizeChatGptPickerLabel(value: string | null | undefined): string {
+  return (value ?? "").replace(/\s+/g, " ").trim();
+}
+
+function matchesChatGptPickerLabel(name: string, label: string): boolean {
+  return name === label || name.startsWith(`${label} `);
+}
+
+interface ChatGptPickerRow {
+  row: Locator;
+  names: string[];
+  checked: string | null;
+}
+
+interface ChatGptPickerSnapshot {
+  labels: string[];
+  rows: ChatGptPickerRow[];
+}
+
+async function snapshotChatGptPickerMenu(menu: Locator): Promise<ChatGptPickerSnapshot> {
+  const rows = menu.locator(CHATGPT_EFFORT_ITEM_SELECTOR);
+  const count = await rows.count().catch(() => 0);
+  const snapshot: ChatGptPickerSnapshot = { labels: [], rows: [] };
+  for (let index = 0; index < count; index += 1) {
+    const row = rows.nth(index);
+    const text = normalizeChatGptPickerLabel(await row.innerText().catch(() => null));
+    const ariaLabel = normalizeChatGptPickerLabel(await row.getAttribute("aria-label").catch(() => null));
+    const names = [...new Set([text, ariaLabel].filter(name => name.length > 0))];
+    if (names[0]) snapshot.labels.push(names[0]);
+    snapshot.rows.push({
+      row,
+      names,
+      checked: await row.getAttribute("aria-checked").catch(() => null),
+    });
+  }
+  return snapshot;
+}
+
+function findChatGptPickerRow(
+  snapshot: ChatGptPickerSnapshot,
+  label: string,
+): ChatGptPickerRow | undefined {
+  return snapshot.rows.find(({ names }) => names.some(name => matchesChatGptPickerLabel(name, label)));
+}
+
+function chatGptPickerExposesKnownModel(labels: readonly string[], knownLabels: readonly string[]): boolean {
+  return labels.some(label => knownLabels.some(known => matchesChatGptPickerLabel(label, known)));
+}
+
+const CHATGPT_MODEL_VIEW_TOGGLE_SELECTOR = [
+  '[data-model-picker-view-toggle="true"]',
+  '[role="menuitem"][aria-label="Select model"]',
+].join(", ");
+
+async function chatGptModelRowIsInteractive(row: Locator): Promise<boolean> {
+  // The default "simple" picker view renders the model-family list inert behind the effort
+  // slider. A radio row there can be read but not activated.
+  return row.evaluate(element => element.closest("[inert]") === null).catch(() => false);
+}
+
+/**
+ * The picker opens in its "simple" effort view on most accounts. Its model-family rows live in
+ * the alternate "advanced" view and are inert until the `Select model` toggle is activated.
+ */
+async function ensureChatGptModelListView(menu: Locator, label: string): Promise<boolean> {
+  const target = findChatGptPickerRow(await snapshotChatGptPickerMenu(menu), label);
+  if (!target) return false;
+  if (await chatGptModelRowIsInteractive(target.row)) return true;
+  const toggle = menu.locator(CHATGPT_MODEL_VIEW_TOGGLE_SELECTOR).first();
+  if (await toggle.count().catch(() => 0) === 0) return false;
+  await toggle.focus().catch(() => {});
+  if (!await toggle.evaluate(element => element === document.activeElement).catch(() => false)) {
+    return false;
+  }
+  await toggle.press("Enter").catch(() => {});
+  const deadline = Date.now() + 5_000;
+  do {
+    const current = findChatGptPickerRow(await snapshotChatGptPickerMenu(menu), label);
+    if (current && await chatGptModelRowIsInteractive(current.row)) return true;
+    if (Date.now() >= deadline) return false;
+    await new Promise(resolveSleep => setTimeout(resolveSleep, 100));
+  } while (true);
+}
+
+async function waitForChatGptModelRowChecked(
+  menu: Locator,
+  label: string,
+  timeoutMs: number,
+): Promise<"checked" | "unchecked" | "absent"> {
+  const deadline = Date.now() + timeoutMs;
+  do {
+    const snapshot = await snapshotChatGptPickerMenu(menu);
+    const target = findChatGptPickerRow(snapshot, label);
+    const state = target === undefined
+      ? "absent"
+      : target.checked === "true"
+        ? "checked"
+        : target.checked === "false"
+          ? "unchecked"
+          : "absent";
+    if (state === "checked") return state;
+    if (state === "absent" && !await menu.isVisible().catch(() => false)) return state;
+    if (Date.now() >= deadline) return state;
+    await new Promise(resolveSleep => setTimeout(resolveSleep, 100));
+  } while (true);
+}
+
+/**
+ * Select the ChatGPT model-family row (for example `GPT-6` versus `GPT-5.6 Sol`) with semantic
+ * keyboard actions only. The composer picker exposes model families as `menuitemradio` rows next
+ * to the effort slider, so pointer coordinates are never used here.
+ *
+ * Returns `not-applicable` when the picker is a legacy effort-only menu with no model rows, and
+ * `unavailable` when the picker exposes model families but not the requested one. The caller must
+ * fail the turn in the latter case instead of silently running another family.
+ */
+export async function selectChatGptModelRow(
+  page: Page,
+  control: Locator,
+  menu: Locator,
+  label: string,
+): Promise<ChatGptModelRowSelection> {
+  const knownLabels = Object.values(CHATGPT_WEB_MODEL_ROW_LABELS);
+  let currentMenu = menu;
+  let snapshot = await snapshotChatGptPickerMenu(currentMenu);
+  const availableLabels = snapshot.labels;
+  // A model-family picker always carries the `Select model` view toggle, even if a future UI
+  // renames the visible families. Use it to distinguish "family missing" from a legacy
+  // effort-only menu where model rows never existed.
+  const hasModelViewToggle = await currentMenu.locator(CHATGPT_MODEL_VIEW_TOGGLE_SELECTOR)
+    .count().catch(() => 0) > 0;
+  const initial = findChatGptPickerRow(snapshot, label);
+  if (!initial) {
+    return {
+      status: hasModelViewToggle || chatGptPickerExposesKnownModel(snapshot.labels, knownLabels)
+        ? "unavailable"
+        : "not-applicable",
+      label,
+      availableLabels,
+      menu: currentMenu,
+    };
+  }
+  if (initial.checked === "true") {
+    // If the picker is already in its advanced model-list view, activate the checked row once to
+    // return to the effort view the caller drives next.
+    if (await chatGptModelRowIsInteractive(initial.row)) {
+      await initial.row.focus().catch(() => {});
+      await initial.row.press("Enter").catch(() => {});
+      await waitForChatGptModelRowChecked(currentMenu, label, 3_000);
+    }
+    if (!await currentMenu.isVisible().catch(() => false)) {
+      try {
+        currentMenu = (await activateChatGptEffortMenu(page, control)).menu;
+      } catch {
+        // The caller reopens from its activation handle if the menu closed.
+      }
+    }
+    return { status: "already-selected", label, availableLabels, menu: currentMenu };
+  }
+  if (initial.checked !== "false") {
+    return { status: "unavailable", label, availableLabels, menu: currentMenu };
+  }
+
+  if (!await ensureChatGptModelListView(currentMenu, label)) {
+    return { status: "unconfirmed", label, availableLabels, menu: currentMenu };
+  }
+
+  for (const key of ["Enter", "Space"] as const) {
+    const target = findChatGptPickerRow(await snapshotChatGptPickerMenu(currentMenu), label);
+    if (!target || !await chatGptModelRowIsInteractive(target.row)) break;
+    await target.row.focus().catch(() => {});
+    if (!await target.row.evaluate(element => element === document.activeElement).catch(() => false)) {
+      continue;
+    }
+    await target.row.press(key).catch(() => {});
+    if (await waitForChatGptModelRowChecked(currentMenu, label, 4_000) === "checked") {
+      // A successful activation normally returns the picker to its effort view without closing
+      // it. If a build closes it instead, reopen so the caller can still drive the slider.
+      if (!await currentMenu.isVisible().catch(() => false)) {
+        try {
+          currentMenu = (await activateChatGptEffortMenu(page, control)).menu;
+        } catch {
+          break;
+        }
+      }
+      return { status: "selected", label, availableLabels, menu: currentMenu };
+    }
+  }
+
+  const finalSnapshot = await snapshotChatGptPickerMenu(currentMenu);
+  return {
+    status: findChatGptPickerRow(finalSnapshot, label)
+      ? "unconfirmed"
+      : hasModelViewToggle || chatGptPickerExposesKnownModel(finalSnapshot.labels, knownLabels)
+        ? "unavailable"
+        : "unconfirmed",
+    label,
+    availableLabels: finalSnapshot.labels.length > 0 ? finalSnapshot.labels : availableLabels,
+    menu: currentMenu,
+  };
 }
 
 function safeIntegerAttribute(value: string | null): number | undefined {
@@ -175,22 +405,61 @@ export async function assertAuthenticatedChatGptPage(page: Page): Promise<void> 
   if (new URL(page.url()).origin !== "https://chatgpt.com") {
     throw new Error("ChatGPT authentication could not be verified: unexpected page origin");
   }
-  const authenticated = await page.evaluate(async () => {
+  type SessionProbe = {
+    kind: "authenticated" | "signed_out" | "profile_loading" | "http_error" | "invalid_response" | "network_error";
+    status?: number;
+  };
+  let probe: SessionProbe = { kind: "network_error" };
+  // A visible composer precedes profile/session hydration, particularly just after boot.
+  // Retry this read-only check before treating an empty session as a lost login. Never
+  // collapse network, challenge, rate-limit, or server failures into a credential error.
+  for (let attempt = 0; attempt < 3; attempt++) {
     try {
-      const response = await fetch("/api/auth/session", {
-        credentials: "include",
-        signal: AbortSignal.timeout(10_000),
+      probe = await page.evaluate(async (): Promise<SessionProbe> => {
+        const signedOut = (status: number): SessionProbe => ({
+          kind: [...document.querySelectorAll('[role="status"]')].some(element => (
+            /^Loading (?:profile|chats)$/i.test(element.textContent?.trim() ?? "")
+          )) ? "profile_loading" : "signed_out",
+          status,
+        });
+        try {
+          const response = await fetch("/api/auth/session", {
+            credentials: "include",
+            cache: "no-store",
+            signal: AbortSignal.timeout(10_000),
+          });
+          if (response.status === 401) return signedOut(response.status);
+          if (!response.ok) return { kind: "http_error", status: response.status };
+          try {
+            const session = await response.json();
+            return typeof session?.user?.id === "string" && session.user.id.length > 0
+              ? { kind: "authenticated", status: response.status } : signedOut(response.status);
+          } catch {
+            return { kind: "invalid_response", status: response.status };
+          }
+        } catch {
+          return { kind: "network_error" };
+        }
       });
-      if (!response.ok) return false;
-      const session = await response.json();
-      return typeof session?.user?.id === "string" && session.user.id.length > 0;
-    } catch {
-      return false;
+    } catch (error) {
+      if (page.isClosed()) throw error;
+      probe = { kind: "network_error" };
     }
-  });
-  if (!authenticated) {
-    throw new Error("ChatGPT authentication could not be verified: sign in to your account first");
+    if (probe.kind === "authenticated") return;
+    console.warn(`[chatgpt-web] session_check attempt=${attempt + 1} outcome=${probe.kind} status=${probe.status ?? "none"}`);
+    if (attempt < 2) await page.waitForTimeout(500 * (attempt + 1));
   }
+  if (probe.kind === "signed_out") {
+    throw new ChatGptWebAdapterError(
+      "ChatGPT login is expired or signed out. Sign in to your account using the plugin's login command.",
+      { status: 401, errorType: "authentication_error", code: "chatgpt_session_expired", retryable: false },
+    );
+  }
+  throw new ChatGptWebAdapterError(
+    `ChatGPT session check is temporarily unavailable (${probe.kind}${probe.status ? `, HTTP ${probe.status}` : ""}). Retry after the network and profile finish loading; your saved login has not been changed.`,
+    { status: probe.status === 429 ? 429 : 503, errorType: probe.status === 429 ? "rate_limit_error" : "server_error",
+      code: probe.status === 429 ? "rate_limit_exceeded" : "chatgpt_session_check_unavailable", retryable: true },
+  );
 }
 
 export async function assertTemporaryChatPage(page: Page): Promise<void> {

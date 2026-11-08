@@ -2,3 +2,14 @@
 - insert:
     - id: dsh-chatgpt-web
       name: '@wlv-zedd/dsh-chatgpt-web'
+# ChatGPT Web is a browser-backed route, so DSH must summarize on the fast route
+# before the work model reaches its inline composer boundary.  This override is
+# intentionally complete because Loader patches replace a row's config wholesale.
+- id: compaction-basic
+  name: '@deepseek-ai/dsh-compaction-basic'
+  config:
+    summarizationProvider: chatgpt-web
+    summarizationModel: chatgpt-web/gpt-6-light
+    headroomTokens: 4096
+    retainTokens: 4096
+    maxTokens: 4096

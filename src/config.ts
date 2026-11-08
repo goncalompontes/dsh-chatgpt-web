@@ -7,7 +7,7 @@ import {
   CHATGPT_WEB_ZERO_RISK_BACKEND_MODEL,
   CHATGPT_WEB_ZERO_RISK_PRO_BACKEND_MODEL,
 } from "./chatgpt-web-models";
-import type { CodexProviderConfig } from "./types";
+import type { ChatGptExternalMcpConfig, CodexProviderConfig } from "./types";
 import { VERSION } from "./version";
 
 export type RuntimeMode = "browser-only" | "full";
@@ -101,17 +101,16 @@ export interface TunnelConfig {
 export { type ChatGptWebTuning } from "./types";
 import type { ChatGptWebTuning } from "./types";
 
-export const CHATGPT_WEB_TUNING_DEFAULTS: Omit<Required<ChatGptWebTuning>, "turnTimeoutMs"> = {
-  composerCharLimit: 120_000,
+export const CHATGPT_WEB_TUNING_DEFAULTS: Omit<Required<ChatGptWebTuning>, "turnTimeoutMs" | "composerCharLimit"> = {
   responseDomGraceMs: 60_000,
   responseDomGraceMaxMs: 240_000,
   responseDomGracePerCharMs: 2.5,
   sendEnableGraceMs: 5_000,
 };
 
-/** Tuning with every default applied; turnTimeoutMs stays optional (absent = no absolute deadline). */
+/** Model-specific composer boundaries apply unless explicitly overridden by the user. */
 export interface ResolvedChatGptWebTuning {
-  composerCharLimit: number;
+  composerCharLimit?: number;
   responseDomGraceMs: number;
   responseDomGraceMaxMs: number;
   responseDomGracePerCharMs: number;
@@ -125,7 +124,9 @@ export function resolveChatGptWebTuning(tuning?: ChatGptWebTuning): ResolvedChat
   if (!tuning) return resolved;
   const pick = (value: number | undefined, fallback: number): number =>
     typeof value === "number" && Number.isFinite(value) && value > 0 ? value : fallback;
-  resolved.composerCharLimit = pick(tuning.composerCharLimit, resolved.composerCharLimit);
+  if (typeof tuning.composerCharLimit === "number" && Number.isFinite(tuning.composerCharLimit) && tuning.composerCharLimit > 0) {
+    resolved.composerCharLimit = tuning.composerCharLimit;
+  }
   resolved.responseDomGraceMs = pick(tuning.responseDomGraceMs, resolved.responseDomGraceMs);
   resolved.responseDomGraceMaxMs = pick(tuning.responseDomGraceMaxMs, resolved.responseDomGraceMaxMs);
   resolved.responseDomGracePerCharMs = pick(tuning.responseDomGracePerCharMs, resolved.responseDomGracePerCharMs);
@@ -146,7 +147,7 @@ export function validateChatGptWebTuning(value: unknown, path = "config"): ChatG
   if (keys.length === 0) throw new Error(`Invalid tuning in ${path}`);
   const tuning: ChatGptWebTuning = {};
   for (const key of keys) {
-    if (key !== "turnTimeoutMs" && !Object.keys(CHATGPT_WEB_TUNING_DEFAULTS).includes(key)) {
+    if (key !== "turnTimeoutMs" && key !== "composerCharLimit" && !Object.keys(CHATGPT_WEB_TUNING_DEFAULTS).includes(key)) {
       throw new Error(`Unknown tuning key ${key} in ${path}`);
     }
     const num = record[key];
@@ -186,6 +187,12 @@ export interface AppConfig {
   experimentalBiggerContext: boolean;
   /** Explicitly install the additional Pro-sized model row while Zero Risk is active. */
   zeroRiskProEnabled: boolean;
+  /**
+   * Opt-in external ChatGPT custom-MCP bridge. The selected connector invokes the plugin's
+   * `dsh` MCP server, which claims turn tokens and streams DSH tool calls through the chat.
+   * This replaces the OpenAI tunnel requirement for DSH-owned installations.
+   */
+  externalMcp?: ChatGptExternalMcpConfig;
   /** Optional adapter-silence budget for the Responses watchdog. */
   stallTimeoutSec?: number;
   /** Optional browser transport tuning; defaults apply per field when absent. */
@@ -612,6 +619,43 @@ function parseConfig(value: unknown, path: string): AppConfig {
   if (parsed.tuning !== undefined) {
     parsed.tuning = validateChatGptWebTuning(parsed.tuning, path);
   }
+  if (parsed.externalMcp !== undefined) {
+    const external = parsed.externalMcp;
+    if (!external || typeof external !== "object" || Array.isArray(external)) {
+      throw new Error(`Invalid externalMcp in ${path}`);
+    }
+    if (typeof external.connectorName !== "string"
+      || external.connectorName.trim().length === 0
+      || external.connectorName.trim().length > 80) {
+      throw new Error(`Invalid externalMcp.connectorName in ${path}`);
+    }
+    if (typeof external.serverName !== "string"
+      || !/^[A-Za-z0-9._-]{1,64}$/.test(external.serverName.trim())) {
+      throw new Error(`Invalid externalMcp.serverName in ${path}`);
+    }
+    if (typeof external.workspace !== "string"
+      || !isAbsolute(expandUserPath(external.workspace))) {
+      throw new Error(`externalMcp.workspace must be absolute in ${path}`);
+    }
+    if (external.sandboxPolicy !== "dangerFullAccess"
+      && external.sandboxPolicy !== "workspaceWrite"
+      && external.sandboxPolicy !== "readOnly") {
+      throw new Error(`Invalid externalMcp.sandboxPolicy in ${path}`);
+    }
+    if (external.networkAccess !== undefined && typeof external.networkAccess !== "boolean") {
+      throw new Error(`Invalid externalMcp.networkAccess in ${path}`);
+    }
+    if (browserInteractionMode === "manual") {
+      throw new Error(`externalMcp is unavailable while Zero Risk is enabled in ${path}`);
+    }
+    parsed.externalMcp = {
+      connectorName: external.connectorName.trim(),
+      serverName: external.serverName.trim(),
+      workspace: expandUserPath(external.workspace),
+      sandboxPolicy: external.sandboxPolicy,
+      ...(external.networkAccess !== undefined ? { networkAccess: external.networkAccess } : {}),
+    };
+  }
   const solAvailable = parsed.solAvailable !== false;
   const proAvailable = parsed.proAvailable === true;
   const experimentalBiggerContext = parsed.experimentalBiggerContext === true;
@@ -644,6 +688,7 @@ export function saveConfig(config: AppConfig): void {
 
 export function providerConfig(config: AppConfig): CodexProviderConfig {
   const manual = config.browserInteractionMode === "manual";
+  const externalMcp = manual ? undefined : config.externalMcp;
   const model = manual
     ? CHATGPT_WEB_ZERO_RISK_BACKEND_MODEL
     : config.solAvailable ? "gpt-5.6-sol" : "gpt-5.6-luna";
@@ -672,7 +717,9 @@ export function providerConfig(config: AppConfig): CodexProviderConfig {
     ),
     noReasoningModels: [],
     chatgptWeb: {
-      appName: manual ? config.manualAppName : config.automaticAppName,
+      appName: manual
+        ? config.manualAppName
+        : externalMcp?.connectorName ?? config.automaticAppName,
       browserInteractionMode: config.browserInteractionMode,
       browserHost: config.browserHost,
       browserHostDescriptorPath: config.browserHostDescriptorPath,
@@ -682,7 +729,20 @@ export function providerConfig(config: AppConfig): CodexProviderConfig {
       threadEnvironmentStatePath: join(getConfigDir(), "runtime", "thread-environments.json"),
       lunaCheckpointStatePath: join(getConfigDir(), "runtime", "luna-checkpoints.json"),
       headed: config.headed,
-      localToolsEnabled: config.mode === "full",
+      localToolsEnabled: config.mode === "full" || externalMcp !== undefined,
+      ...(externalMcp
+        ? {
+          externalMcp: {
+            connectorName: externalMcp.connectorName,
+            serverName: externalMcp.serverName,
+            workspace: resolve(expandUserPath(externalMcp.workspace)),
+            sandboxPolicy: externalMcp.sandboxPolicy,
+            ...(externalMcp.networkAccess !== undefined
+              ? { networkAccess: externalMcp.networkAccess }
+              : {}),
+          },
+        }
+        : {}),
       solAvailable: manual ? false : config.solAvailable,
       proAvailable: manual ? false : config.proAvailable,
       experimentalBiggerContext: manual ? false : config.experimentalBiggerContext,

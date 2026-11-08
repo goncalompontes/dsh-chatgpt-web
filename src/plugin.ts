@@ -5,6 +5,7 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 export interface CordisContext {
+  on?: (event: string, listener: (...args: any[]) => any) => unknown;
   effect?: (cb: () => void | Promise<void> | (() => void) | (() => Promise<void>)) => void;
   logger?: (name: string) => {
     info(msg: string): void;
@@ -28,6 +29,8 @@ export interface ChatGPTWebPluginConfig {
   readyTimeoutMs?: number;
   /** Explicit path to the bun executable (optional). */
   bunPath?: string;
+  /** Optional stack supervisor command. When configured, it owns shared worker lifetimes. */
+  stackCommand?: string[];
 }
 
 import { pathToFileURL } from "node:url";
@@ -106,9 +109,38 @@ export function apply(ctx: CordisContext, config: ChatGPTWebPluginConfig = {}): 
   const readyTimeoutMs = config.readyTimeoutMs || 30_000;
   const logger = typeof ctx.logger === "function" ? ctx.logger("chatgpt-web") : console;
 
+  // DSH exposes stable session identity and auxiliary purpose at its provider boundary.
+  // Keep these out of model-visible text and avoid changing other providers' requests.
+  ctx.on?.("llm-pi-ai/request-headers", (request, headers: Headers, next: () => Headers) => {
+    const result = next();
+    let endpoint: URL;
+    try { endpoint = new URL(request.baseURL); } catch { return result; }
+    if (endpoint.hostname !== host || endpoint.port !== String(port)) return result;
+    if (request.sessionId !== undefined) result.set("x-dsh-session-id", String(request.sessionId));
+    if (request.purpose !== undefined) result.set("x-dsh-request-purpose", String(request.purpose));
+    return result;
+  });
+
   let spawnedProcess: ChildProcess | undefined;
+  const installedStack = join(homedir(), ".local", "share", "dsh-web-stack", "stack.py");
+  const stackCommand = config.stackCommand
+    ?? (host === "127.0.0.1" && port === 17841 && existsSync(installedStack) ? ["python3", installedStack] : undefined);
+  let disposed = false;
 
   const startDaemon = async () => {
+    if (stackCommand?.length && autoStart) {
+      // Register the DSH host PID even when the sidecar is already healthy. A health-only
+      // check loses the consumer lease and lets an idle supervisor stop a live session.
+      const child = spawn(stackCommand[0]!, [...stackCommand.slice(1), "ensure", "--client-pid", String(process.pid)], {
+        stdio: ["ignore", "ignore", "pipe"], windowsHide: true,
+      });
+      child.stderr?.on("data", (chunk: Buffer) => logger.warn(`[stack] ${chunk.toString().trim()}`));
+      child.on("error", error => logger.error(`[dsh-chatgpt-web] Stack supervisor failed: ${error.message}`));
+      child.on("exit", code => {
+        if (code && !disposed) logger.error(`[dsh-chatgpt-web] Stack supervisor readiness failed (exit ${code})`);
+      });
+      return;
+    }
     const alreadyHealthy = await isSidecarHealthy(host, port);
     if (alreadyHealthy) {
       logger.info(`[dsh-chatgpt-web] Sidecar already running and healthy at http://${host}:${port}/v1`);
@@ -169,6 +201,10 @@ export function apply(ctx: CordisContext, config: ChatGPTWebPluginConfig = {}): 
   };
 
   const stopDaemon = async () => {
+    disposed = true;
+    // Shared stack workers are released by PID lifetime + idle grace, not by a single
+    // profile's teardown. Other DSH sessions may still need the same broker/gateway.
+    if (stackCommand?.length) return;
     if (!spawnedProcess) return;
 
     logger.info("[dsh-chatgpt-web] Stopping sidecar daemon...");

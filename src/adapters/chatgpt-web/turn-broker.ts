@@ -410,11 +410,13 @@ export class TurnBroker implements TurnBrokerOwner {
       if (signal) {
         waiter.onAbort = () => {
           channel.waiters.delete(waiter);
+          console.info(`[chatgpt-web] broker trace=${channel.traceId} waiter_removed waiters=${channel.waiters.size} queued=${channel.queuedCallIds.length}`);
           rejectWait(new DOMException("tool wait aborted", "AbortError"));
         };
         signal.addEventListener("abort", waiter.onAbort, { once: true });
       }
       channel.waiters.add(waiter);
+      console.info(`[chatgpt-web] broker trace=${channel.traceId} waiter_registered waiters=${channel.waiters.size} queued=${channel.queuedCallIds.length}`);
     });
   }
 
@@ -1122,7 +1124,26 @@ export class TurnBroker implements TurnBrokerOwner {
       ...(request.freeform === true ? { input: request.input ?? "" } : { arguments: request.arguments ?? {} }),
     };
     return new Promise<BrokerToolResult>((resolveInvoke, rejectInvoke) => {
-      binding.channel.invocations.set(callId, { request: toolRequest, resolve: resolveInvoke, reject: rejectInvoke });
+      const cleanup = () => socketSignal?.removeEventListener("abort", onAbort);
+      const onAbort = () => {
+        cleanup();
+        const delivered = binding.channel.deliveredCallIds.has(callId);
+        // Undelivered work can be withdrawn. Delivered work may already have side effects:
+        // retain its id until the adapter submits the result, so it is never replayed as new work.
+        if (!delivered) {
+          binding.channel.invocations.delete(callId);
+          binding.channel.queuedCallIds = binding.channel.queuedCallIds.filter(id => id !== callId);
+        }
+        console.info(`[chatgpt-web] broker trace=${binding.channel.traceId} invocation_disconnected call=${callId.slice(0, 17)} delivered=${delivered}`);
+        rejectInvoke(new DOMException("tool invocation caller disconnected", "AbortError"));
+      };
+      if (socketSignal?.aborted) { onAbort(); return; }
+      binding.channel.invocations.set(callId, {
+        request: toolRequest,
+        resolve: result => { cleanup(); resolveInvoke(result); },
+        reject: error => { cleanup(); rejectInvoke(error); },
+      });
+      socketSignal?.addEventListener("abort", onAbort, { once: true });
       binding.channel.queuedCallIds.push(callId);
       console.info(
         `[chatgpt-web] broker trace=${binding.channel.traceId} queued call=${callId.slice(0, 17)} tool=${wireName} waiters=${binding.channel.waiters.size}`,

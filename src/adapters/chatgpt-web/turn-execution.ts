@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { dshCompactionEpoch } from "../../responses/dsh-context";
 import type { AdapterEvent, CodexParsedRequest } from "../../types";
 import type { BrokerToolRequest } from "./turn-broker";
 import { chatGptBrowserTabClosedError } from "./adapter-error";
@@ -8,6 +9,10 @@ import {
   extractChatGptTurnUserRevision,
 } from "./environment";
 import { MAX_CHATGPT_BROWSER_TABS } from "./concurrency";
+import { ChatGptBrowserAdmission } from "./browser-admission";
+import { BrowserAdmissionCapacityMonitor } from "./browser-capacity-monitor";
+import { BrowserCapacityController, type BrowserCapacitySample } from "./browser-capacity";
+import { sampleLinuxBrowserResources } from "./browser-resources";
 import type { ChatGptExternalTurnProgress } from "./turn-progress";
 
 function awaitWithAbort<T>(promise: Promise<T>, signal?: AbortSignal): Promise<T> {
@@ -38,6 +43,22 @@ function awaitWithAbort<T>(promise: Promise<T>, signal?: AbortSignal): Promise<T
 export type ChatGptBrowserOutcome =
   | { type: "final"; answer: string }
   | { type: "error"; error: Error };
+
+/** Match native wire ids first, then the response-item suffix added by DSH/pi-ai. */
+export function outstandingChatGptToolCallId(
+  value: string,
+  session: Pick<ChatGptTurnSession, "hasOutstanding">,
+): string | undefined {
+  if (session.hasOutstanding(value)) return value;
+  // DSH/pi-ai appends a pipe-delimited response-item suffix. Native call ids can
+  // themselves contain pipes, so choose the longest outstanding prefix to avoid
+  // delivering a result to a different pending invocation.
+  for (let separator = value.lastIndexOf("|"); separator > 0; separator = value.lastIndexOf("|", separator - 1)) {
+    const base = value.slice(0, separator);
+    if (session.hasOutstanding(base)) return base;
+  }
+  return undefined;
+}
 
 export interface ChatGptTraceEvent {
   kind: "reasoning" | "commentary";
@@ -145,6 +166,9 @@ interface ChatGptTurnRuntimeBase {
   trace: ChatGptTraceFeed;
   text: ChatGptTextFeed;
   usageInput?: CodexParsedRequest;
+  inputAccounting?: import("./usage").ChatGptWebInputAccounting;
+  /** Most recently delivered MCP input, retained when a settled response is replayed. */
+  continuationInputAccounting?: import("./usage").ChatGptWebInputAccounting;
   conversationKey?: string;
   releaseRetainedConversation?: () => Promise<void>;
   /** Idempotently retire the turn-bound MCP capability after browser and observer settlement. */
@@ -185,10 +209,12 @@ function compactionInputRevision(parsed: CodexParsedRequest): unknown[] {
 
 export function chatGptTurnExecutionKey(parsed: CodexParsedRequest): string {
   const identity = extractChatGptTurnIdentity(parsed);
+  const checkpoint = dshCompactionEpoch(parsed);
   if (!identity.turnId) throw new Error("ChatGPT web requires native Codex turn_id metadata for browser-session replay");
   return executionKey(parsed, {
     threadId: identity.threadId,
     turnId: identity.turnId,
+    ...(checkpoint ? { dshCheckpoint: checkpoint } : {}),
     purpose: parsed._compactionRequest ? "compaction" : "response",
     revision: parsed._compactionRequest
       ? compactionInputRevision(parsed)
@@ -216,10 +242,12 @@ export function chatGptTurnRoundKey(parsed: CodexParsedRequest): string {
 /** Stable identity for limiting automatic retries of one native Codex turn. */
 export function chatGptTurnRetryKey(parsed: CodexParsedRequest): string {
   const identity = extractChatGptTurnIdentity(parsed);
+  const checkpoint = dshCompactionEpoch(parsed);
   if (!identity.turnId) throw new Error("ChatGPT web requires native Codex turn_id metadata for browser-turn retry budgeting");
   return createHash("sha256").update(JSON.stringify({
     threadId: identity.threadId,
     turnId: identity.turnId,
+    ...(checkpoint ? { dshCheckpoint: checkpoint } : {}),
     purpose: parsed._compactionRequest ? "compaction" : "response",
   })).digest("hex");
 }
@@ -450,7 +478,9 @@ export class ChatGptTurnSession {
     // At physical settlement, read the current tail so every tool-result/reconnect observer that
     // was already admitted finishes before the capability is retired.
     void this.physicalSettlement
-      .then(() => this.tail)
+      // Teardown can reject after the browser turn has physically ended. The capability must
+      // still be revoked, but the original settlement failure remains visible to its callers.
+      .then(() => this.tail, () => this.tail)
       .then(() => this.runtime.retireCapability!())
       .catch(error => {
         console.error(
@@ -481,11 +511,20 @@ export class ChatGptTurnSessions {
   private readonly retirements = new Map<string, Promise<void>>();
   private readonly ownerRetirements = new Map<string, Promise<void>>();
   private readonly conversationRetirements = new Map<string, Promise<void>>();
+  private readonly admission = new ChatGptBrowserAdmission(MAX_CHATGPT_BROWSER_TABS);
+  private readonly capacityMonitor?: BrowserAdmissionCapacityMonitor;
 
   constructor(
     private readonly ttlMs = 30 * 60_000,
     private readonly maxEntries = 256,
-  ) {}
+    adaptiveSample?: () => BrowserCapacitySample | null,
+  ) {
+    if (adaptiveSample) {
+      this.capacityMonitor = new BrowserAdmissionCapacityMonitor(
+        this.admission, new BrowserCapacityController(), adaptiveSample,
+      );
+    }
+  }
 
   getOrCreate(
     key: string,
@@ -545,11 +584,35 @@ export class ChatGptTurnSessions {
         // kill the response already using that retained conversation. Wait for its complete
         // browser/launcher settlement; explicit tab close and lifecycle cancellation remain the
         // only paths that preempt an active owner.
-        await awaitWithAbort(ownedSession.physicalSettlement, signal);
+        // A failed launcher teardown has still physically settled. Do not poison the next
+        // native owner's admission with the previous helper's cleanup error.
+        await awaitWithAbort(ownedSession.physicalSettlement.then(() => {}, () => {}), signal);
         continue;
       }
-      if (signal?.aborted) throw new DOMException("ChatGPT web turn aborted", "AbortError");
-      return this.getOrCreate(key, start, traceId, ownerKey, nativeTurnId, nativeThreadId);
+      this.capacityMonitor?.start();
+      const release = await this.admission.acquire(signal);
+      let transferred = false;
+      try {
+        if (signal?.aborted) throw new DOMException("ChatGPT web turn aborted", "AbortError");
+        const raced = this.entries.get(key);
+        if (raced) {
+          raced.touch();
+          return raced;
+        }
+        const competingOwner = [...this.entries].some(([ownedKey, session]) => (
+          ownedKey !== key && session.ownerKey === ownerKey && !session.isPhysicallySettled()
+        ));
+        if (competingOwner || this.ownerRetirements.has(ownerKey) || this.retirements.has(key)) {
+          continue;
+        }
+        const session = this.getOrCreate(key, start, traceId, ownerKey, nativeTurnId, nativeThreadId);
+        // A lease outlives the logical response until the browser/helper physically settles.
+        void session.physicalSettlement.then(release, release);
+        transferred = true;
+        return session;
+      } finally {
+        if (!transferred) release();
+      }
     }
   }
 
@@ -632,8 +695,11 @@ export class ChatGptTurnSessions {
     const release = matches.findLast(([, session]) => (
       session.runtime.releaseRetainedConversation !== undefined
     ))?.[1].runtime.releaseRetainedConversation;
+    // Release the retained browser epoch even if launcher teardown fails. A rejected
+    // physical settlement must remain visible to the caller, not strand the retained tab.
     const retirement = Promise.all(matches.map(([, session]) => session.physicalSettlement))
-      .then(async () => { await release?.(); });
+      .then(() => undefined)
+      .finally(async () => { await release?.(); });
     this.conversationRetirements.set(conversationKey, retirement);
     try {
       await retirement;
@@ -777,15 +843,18 @@ export class ChatGptTurnSessions {
     const conversationKey = session.conversationKey();
     session.cancel(reason);
     const retirement = session.physicalSettlement;
-    this.retirements.set(key, retirement);
-    void retirement.then(() => {
-      if (this.retirements.get(key) === retirement) this.retirements.delete(key);
+    // A rejected physical teardown is an error to the caller, but it must not strand the
+    // registry's admission barriers or generate unhandled cleanup-chain rejections.
+    const settled = retirement.then(() => {}, () => {});
+    this.retirements.set(key, settled);
+    void settled.then(() => {
+      if (this.retirements.get(key) === settled) this.retirements.delete(key);
     });
     if (session.ownerKey) {
       const previous = this.ownerRetirements.get(session.ownerKey);
       const ownerRetirement = previous
-        ? Promise.all([previous, retirement]).then(() => undefined)
-        : retirement;
+        ? Promise.all([previous, settled]).then(() => undefined)
+        : settled;
       this.ownerRetirements.set(session.ownerKey, ownerRetirement);
       void ownerRetirement.then(() => {
         if (this.ownerRetirements.get(session.ownerKey!) === ownerRetirement) {
@@ -796,8 +865,8 @@ export class ChatGptTurnSessions {
     if (conversationKey) {
       const previous = this.conversationRetirements.get(conversationKey);
       const conversationRetirement = previous
-        ? Promise.all([previous, retirement]).then(() => undefined)
-        : retirement;
+        ? Promise.all([previous, settled]).then(() => undefined)
+        : settled;
       this.conversationRetirements.set(conversationKey, conversationRetirement);
       const forgetConversationRetirement = () => {
         if (this.conversationRetirements.get(conversationKey) === conversationRetirement) {
@@ -813,4 +882,6 @@ export class ChatGptTurnSessions {
   }
 }
 
-export const chatGptTurnSessions = new ChatGptTurnSessions();
+// Keep tests and auxiliary registries deterministic; only the production singleton
+// samples host pressure. The worker still independently enforces its five-run cap.
+export const chatGptTurnSessions = new ChatGptTurnSessions(undefined, undefined, sampleLinuxBrowserResources);

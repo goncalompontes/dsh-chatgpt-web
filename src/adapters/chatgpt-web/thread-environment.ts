@@ -125,6 +125,11 @@ export class ChatGptThreadEnvironmentStore {
     private readonly now: () => number = Date.now,
     private readonly codexHome: string = getCodexHome(),
     private readonly sqliteHome?: string,
+    /**
+     * Workspace authority for DSH-owned turns that have no native Codex environment envelope.
+     * Used only when the request carries no contradictory raw environment context.
+     */
+    private readonly fallback?: Omit<ChatGptTurnEnvironment, "tools">,
   ) {}
 
   resolve(parsed: CodexParsedRequest): ChatGptTurnEnvironment {
@@ -158,6 +163,15 @@ export class ChatGptThreadEnvironmentStore {
         sandboxPolicy: sameThread.sandboxPolicy,
         tools: parsed.context.tools ?? [],
       };
+
+      if (this.fallback) {
+        const environment: ChatGptTurnEnvironment = {
+          ...this.fallback,
+          tools: parsed.context.tools ?? [],
+        };
+        this.set(identity.threadId, environment);
+        return environment;
+      }
 
       if (!lineage) throw error;
       const parent = this.get(lineage.parentThreadId);

@@ -14,7 +14,7 @@ import {
   zeroRiskActiveCompactionToolResultInstruction,
 } from "./native-compaction-control";
 import type { BrokerToolResult, TurnBroker, TurnBrokerOwner } from "./turn-broker";
-import type { ChatGptTurnSession } from "./turn-execution";
+import { outstandingChatGptToolCallId, type ChatGptTurnSession } from "./turn-execution";
 
 export const LATEST_USER_PROMPT_MARKER = "CODEX_LATEST_USER_PROMPT_JSON";
 
@@ -118,11 +118,13 @@ function currentToolResults(
 ): Map<string, CodexToolResultMessage> {
   const results = new Map<string, CodexToolResultMessage>();
   for (const message of parsed.context.messages) {
-    if (message.role !== "toolResult" || !session.hasOutstanding(message.toolCallId)) continue;
-    if (results.has(message.toolCallId)) {
-      throw new Error(`Codex returned duplicate results for tool call ${message.toolCallId}`);
+    if (message.role !== "toolResult") continue;
+    const callId = outstandingChatGptToolCallId(message.toolCallId, session);
+    if (!callId) continue;
+    if (results.has(callId)) {
+      throw new Error(`Codex returned duplicate results for tool call ${callId}`);
     }
-    results.set(message.toolCallId, message);
+    results.set(callId, { ...message, toolCallId: callId });
   }
   return results;
 }

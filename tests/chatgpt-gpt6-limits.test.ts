@@ -3,6 +3,7 @@ import {
   assertChatGptWebInputWithinLimits,
   assertChatGptWebMultipartInputWithinLimits,
 } from "../src/adapters/chatgpt-web/browser-worker";
+import { resolveChatGptWebTuning, validateChatGptWebTuning } from "../src/config";
 
 const plusCapabilities = {
   localToolsEnabled: true,
@@ -15,6 +16,16 @@ test("GPT-6 turns are not rejected by the Plus transport limit gate", () => {
   expect(() => assertChatGptWebInputWithinLimits(100, 100, "gpt-6", "low", plusCapabilities, 10)).not.toThrow();
   expect(() => assertChatGptWebInputWithinLimits(100, 100, "gpt-6", "medium", plusCapabilities, 10)).not.toThrow();
   expect(() => assertChatGptWebInputWithinLimits(100, 100, "gpt-6", "high", plusCapabilities, 10)).not.toThrow();
+});
+
+test("default tuning preserves model-specific composer boundaries instead of Luna's 120k cap", () => {
+  const tuning = resolveChatGptWebTuning();
+  expect(tuning.composerCharLimit).toBeUndefined();
+  expect(() => assertChatGptWebInputWithinLimits(50_000, 40_000, "gpt-6", "high", plusCapabilities,
+    177_350, tuning.composerCharLimit)).not.toThrow();
+  expect(() => assertChatGptWebInputWithinLimits(50_000, 40_000, "gpt-6", "high", plusCapabilities,
+    177_350, 120_000)).toThrow(/120,000/);
+  expect(validateChatGptWebTuning({ composerCharLimit: 211_256 })).toEqual({ composerCharLimit: 211_256 });
 });
 
 test("GPT-6 still enforces the Sol-class context window", () => {

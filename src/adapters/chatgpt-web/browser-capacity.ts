@@ -1,0 +1,96 @@
+/** Pure, conservative resource-bound capacity estimator. No browser lifecycle side effects. */
+export interface BrowserCapacitySample {
+  availableMemoryBytes: number;
+  cpuCount: number;
+  loadAverageOneMinute: number;
+  /** Optional measured per-active-turn browser/launcher incremental RSS. */
+  turnRssBytes?: number;
+}
+
+export interface BrowserCapacityLimits {
+  min: number;
+  max: number;
+  memoryReserveBytes: number;
+  defaultTurnRssBytes: number;
+  /** Fraction of host CPUs allowed for estimated admission; 0..1. */
+  cpuHeadroomFraction: number;
+}
+
+export const DEFAULT_BROWSER_CAPACITY_LIMITS: BrowserCapacityLimits = {
+  min: 1,
+  max: 5, // Keep the current independently enforced browser-worker limit until validated.
+  memoryReserveBytes: 4 * 1024 ** 3,
+  defaultTurnRssBytes: 768 * 1024 ** 2,
+  cpuHeadroomFraction: 0.75,
+};
+
+export function estimateBrowserCapacity(
+  sample: BrowserCapacitySample | null,
+  limits: BrowserCapacityLimits = DEFAULT_BROWSER_CAPACITY_LIMITS,
+): number {
+  if (!Number.isSafeInteger(limits.min) || limits.min < 1 ||
+      !Number.isSafeInteger(limits.max) || limits.max < limits.min ||
+      !Number.isFinite(limits.memoryReserveBytes) || limits.memoryReserveBytes < 0 ||
+      !Number.isFinite(limits.defaultTurnRssBytes) || limits.defaultTurnRssBytes <= 0 ||
+      !Number.isFinite(limits.cpuHeadroomFraction) ||
+      limits.cpuHeadroomFraction <= 0 || limits.cpuHeadroomFraction > 1) {
+    throw new Error("Invalid browser capacity limits");
+  }
+  if (!sample ||
+      !Number.isFinite(sample.availableMemoryBytes) || sample.availableMemoryBytes < 0 ||
+      !Number.isFinite(sample.cpuCount) || sample.cpuCount < 1 ||
+      !Number.isFinite(sample.loadAverageOneMinute) || sample.loadAverageOneMinute < 0) {
+    return limits.min;
+  }
+
+  const rss = sample.turnRssBytes && Number.isFinite(sample.turnRssBytes) && sample.turnRssBytes > 0
+    ? Math.max(sample.turnRssBytes, limits.defaultTurnRssBytes / 2)
+    : limits.defaultTurnRssBytes;
+  const memoryBudget = Math.max(0, sample.availableMemoryBytes - limits.memoryReserveBytes);
+  const memorySlots = Math.floor(memoryBudget / rss);
+  const cpuBudget = Math.max(0, sample.cpuCount * limits.cpuHeadroomFraction - sample.loadAverageOneMinute);
+  // Every turn gets at least one CPU-equivalent of remaining headroom. Host load is
+  // an imperfect pressure signal; it must not expand capacity beyond the hard maximum.
+  const cpuSlots = Math.floor(cpuBudget);
+  return Math.max(limits.min, Math.min(limits.max, memorySlots, cpuSlots));
+}
+
+/** Scale down immediately; require repeated healthy samples before scaling up. */
+export class BrowserCapacityController {
+  private capacity: number;
+  private positiveSamples = 0;
+  private lastChangeMs = Number.NEGATIVE_INFINITY;
+  constructor(
+    private readonly limits: BrowserCapacityLimits = DEFAULT_BROWSER_CAPACITY_LIMITS,
+    private readonly upwardSamples = 3,
+    private readonly cooldownMs = 30_000,
+  ) {
+    if (!Number.isSafeInteger(upwardSamples) || upwardSamples < 1 ||
+        !Number.isFinite(cooldownMs) || cooldownMs < 0) {
+      throw new Error("Invalid browser capacity controller settings");
+    }
+    this.capacity = limits.min;
+    estimateBrowserCapacity(null, limits);
+  }
+
+  current(): number { return this.capacity; }
+
+  update(sample: BrowserCapacitySample | null, nowMs: number): number {
+    if (!Number.isFinite(nowMs)) throw new Error("Invalid capacity observation time");
+    const target = estimateBrowserCapacity(sample, this.limits);
+    if (target <= this.capacity) {
+      this.positiveSamples = 0;
+      if (target < this.capacity) {
+        this.capacity = target;
+        this.lastChangeMs = nowMs;
+      }
+      return this.capacity;
+    }
+    if (++this.positiveSamples >= this.upwardSamples && nowMs - this.lastChangeMs >= this.cooldownMs) {
+      this.capacity = Math.min(this.capacity + 1, target);
+      this.positiveSamples = 0;
+      this.lastChangeMs = nowMs;
+    }
+    return this.capacity;
+  }
+}

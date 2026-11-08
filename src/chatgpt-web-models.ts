@@ -2,8 +2,18 @@ export const CHATGPT_WEB_MODEL_PREFIX = "chatgpt-web/";
 export const CHATGPT_WEB_BACKEND_MODEL = "gpt-5.6-sol";
 export const CHATGPT_WEB_LUNA_BACKEND_MODEL = "gpt-5.6-luna";
 /** GPT-6 appears in the Plus picker (2026-10) alongside GPT-5.6 Sol. Selecting it is a
- *  pure browser-UI action (click the model row), so it needs no extra transport window. */
+ *  pure browser-UI action (keyboard activation of the model row), so it needs no extra
+ *  transport window. */
 export const CHATGPT_WEB_GPT6_BACKEND_MODEL = "gpt-6";
+/**
+ * Visible label of each selectable ChatGPT model family in the composer picker.
+ * The picker exposes these as `menuitemradio` rows next to the reasoning-effort slider, so the
+ * route's backend model must be translated into the row the browser operator selects.
+ */
+export const CHATGPT_WEB_MODEL_ROW_LABELS: Record<string, string> = {
+  [CHATGPT_WEB_BACKEND_MODEL]: "GPT-5.6 Sol",
+  [CHATGPT_WEB_GPT6_BACKEND_MODEL]: "GPT-6",
+};
 /** Internal adapter identity for a turn whose ChatGPT model is selected by the user in the launcher. */
 export const CHATGPT_WEB_ZERO_RISK_BACKEND_MODEL = "chatgpt-web-zero-risk";
 /** Internal adapter identity for the explicitly enabled, Pro-sized Zero Risk context profile. */

@@ -14,6 +14,8 @@ export interface CodexParsedRequest {
    * (see src/responses/compaction.ts).
    */
   _compactionRequest?: boolean;
+  /** Auxiliary request purpose provided by DSH's native transport header hook. */
+  _dshRequestPurpose?: string;
   /**
    * True when Codex MultiAgent V2 delegated an agent_message as provider-private encrypted_content.
    * ChatGPT Web has no OpenAI backend key for that blob; the Responses HTTP boundary rejects it
@@ -244,6 +246,8 @@ export interface CodexUsage {
   cacheCreationInputTokens?: number;
   reasoningOutputTokens?: number;
   estimated?: boolean;
+  /** Browser providers can estimate transport payloads but cannot observe retained model context. */
+  inputScope?: "browser_submission" | "tool_results" | "canonical_history";
 }
 
 /**
@@ -251,7 +255,7 @@ export interface CodexUsage {
  * (see CHATGPT_WEB_TUNING_DEFAULTS in config.ts) when a field is absent.
  */
 export interface ChatGptWebTuning {
-  /** Hard character boundary for one visible composer message (Luna route). */
+  /** Optional override of the selected model's visible composer character boundary. */
   composerCharLimit?: number;
   /** Floor for the first-assistant-token grace. */
   responseDomGraceMs?: number;
@@ -263,6 +267,19 @@ export interface ChatGptWebTuning {
   sendEnableGraceMs?: number;
   /** Optional absolute ceiling for one browser turn. */
   turnTimeoutMs?: number;
+}
+
+/**
+ * Opt-in bridge from a user-owned ChatGPT custom MCP connector to the plugin's turn broker.
+ * The connector (for example `local-shell`) invokes the plugin's `dsh` MCP server, whose
+ * `codex_*` tools claim the active turn token and stream DSH tool calls through the chat.
+ */
+export interface ChatGptExternalMcpConfig {
+  connectorName: string;
+  serverName: string;
+  workspace: string;
+  sandboxPolicy: "dangerFullAccess" | "workspaceWrite" | "readOnly";
+  networkAccess?: boolean;
 }
 
 /** The only provider configuration supported by this focused runtime. */
@@ -316,6 +333,8 @@ export interface CodexProviderConfig {
     headed?: boolean;
     /** Attach the turn-bound Codex MCP capability for every connector-capable Web model. */
     localToolsEnabled?: boolean;
+    /** Use an external custom ChatGPT MCP connector instead of the OpenAI tunnel. */
+    externalMcp?: ChatGptExternalMcpConfig;
     /** Account capability proven by the authenticated browser probe. */
     solAvailable?: boolean;
     /** Account capability proven by the authenticated browser probe. */

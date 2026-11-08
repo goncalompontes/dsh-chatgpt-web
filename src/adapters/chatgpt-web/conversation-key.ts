@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { SUMMARY_PREFIX } from "../../responses/compaction";
+import { isDshCompactionSummaryText } from "../../responses/dsh-context";
 import type { CodexParsedRequest } from "../../types";
 import { extractChatGptTurnIdentity } from "./environment";
 
@@ -22,7 +23,8 @@ function compactionEpoch(input: unknown[] | undefined): unknown {
     return record.type === "compaction"
       || record.type === "compaction_summary"
       || record.type === "context_compaction"
-      || (record.role === "user" && messageText(record)?.startsWith(`${SUMMARY_PREFIX}\n`));
+      || (record.role === "user" && (messageText(record)?.startsWith(`${SUMMARY_PREFIX}\n`)
+        || isDshCompactionSummaryText(messageText(record))));
   }) ?? null;
 }
 

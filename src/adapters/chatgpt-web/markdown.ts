@@ -5,6 +5,8 @@ const turndown = new TurndownService({
   headingStyle: "atx",
   bulletListMarker: "-",
   codeBlockStyle: "fenced",
+  // Modern ChatGPT code sources contain CODE inside DIV rather than PRE.
+  preformattedCode: true,
   fence: "```",
   emDelimiter: "*",
   strongDelimiter: "**",
@@ -12,15 +14,73 @@ const turndown = new TurndownService({
 });
 
 turndown.use(gfm);
+turndown.addRule("chatGptTableCell", {
+  filter: ["th", "td"],
+  replacement: (content, node) => {
+    // The current renderer puts paragraphs inside every cell. Block newlines would split
+    // the Markdown row; retain their inline formatting and represent internal breaks explicitly.
+    const text = content.trim().replace(/\s*\n+\s*/g, "<br>").replace(/(?<!\\)\|/g, "\\|");
+    const first = (node.parentNode as HTMLElement).children[0] === node;
+    return `${first ? "| " : " "}${text} |`;
+  },
+});
+turndown.addRule("chatGptCodeBlock", {
+  filter: node => node.nodeType === 1
+    && (node as HTMLElement).getAttribute("data-code-block") === "true"
+    // Turndown's server DOM returns undefined for a missing source (browsers return null).
+    && Boolean((node as HTMLElement).querySelector("[data-code-block-source]")),
+  replacement: (_content, node) => {
+    const element = node as HTMLElement;
+    const source = element.querySelector("[data-code-block-source]")!;
+    // Read source text directly: converting its highlighted spans as inline code collapses
+    // newlines and indentation. Exclude the language label and toolbar from the fence body.
+    const code = source.textContent ?? "";
+    const header = element.querySelector('[data-markdown-copy="exclude"]');
+    const label = (header?.firstElementChild ?? header)?.textContent?.trim().toLowerCase() ?? "";
+    const language = label === "plain text" ? "text" : /^[a-z0-9_+#.-]+$/.test(label) ? label : "";
+    const fence = "`".repeat(Math.max(3, ...[...code.matchAll(/`+/g)].map(match => match[0].length + 1)));
+    return `\n\n${fence}${language}\n${code}${code.endsWith("\n") ? "" : "\n"}${fence}\n\n`;
+  },
+});
 turndown.remove(["button", "script", "style", "canvas", "noscript", "iframe"]);
-turndown.addRule("removeImages", {
+// Preserve image references when a browser-exposed, absolute HTTPS/HTTP URL is available.
+// Embedded data URLs and blob URLs are intentionally not copied into model text: the former
+// could inline megabytes and the latter are inaccessible outside the ephemeral browser page.
+turndown.addRule("chatGptImages", {
   filter: node => ["IMG", "PICTURE", "SOURCE"].includes(node.nodeName),
-  replacement: () => "",
+  replacement: (_content, node) => {
+    if (node.nodeName !== "IMG") return "";
+    const image = node as HTMLElement;
+    const source = image.getAttribute("src") ?? "";
+    if (!/^https?:\/\/[^\s<>]+$/i.test(source)) {
+      const alt = image.getAttribute("alt")?.trim();
+      return alt ? `[Image: ${alt.replace(/[\[\]]/g, "")}]` : "";
+    }
+    const alt = (image.getAttribute("alt")?.trim() || "Image").replace(/[\[\]]/g, "");
+    return `![${alt}](${source.replaceAll("(", "%28").replaceAll(")", "%29")})`;
+  },
 });
 turndown.addRule("removeSvg", {
   filter: node => node.nodeName === "SVG",
   replacement: () => "",
 });
+function readableWidgetSummary(element: HTMLElement): string {
+  const noise = /^(?:use two fingers to move the map|hold ctrl to zoom|map data|report a map error|zoom in|zoom out|openstreetmap|mapbox|google maps|map)$/i;
+  const semantic = [...element.querySelectorAll("a[href], [data-testid*='place'], [data-testid*='location'], h2, h3, h4")]
+    .filter(node => !node.closest("button"))
+    .map(node => {
+      const label = (node.textContent ?? "").replace(/\s+/g, " ").trim();
+      if (label.length < 3 || label.length > 200 || noise.test(label) || /^\d+(?:[.,]\d+)?$/.test(label)) return "";
+      if (node.nodeName !== "A") return label;
+      const href = (node as HTMLElement).getAttribute("href") ?? "";
+      return /^https?:\/\/[^\s<>]+$/i.test(href)
+        ? `[${label.replace(/[\[\]]/g, "")}](${href.replaceAll("(", "%28").replaceAll(")", "%29")})`
+        : label;
+    }).filter(Boolean);
+  const deduped = [...new Set(semantic)];
+  return deduped.length ? `\n\n${deduped.slice(0, 25).join("\n\n")}\n\n` : "";
+}
+
 turndown.addRule("removeMapAndWidgets", {
   filter: node => {
     if (node.nodeType !== 1) return false;
@@ -44,32 +104,11 @@ turndown.addRule("removeMapAndWidgets", {
       }
     }
 
-    if (/^\d+$/.test(text)) {
-      let insideListOrCode = false;
-      for (let cur: Node | null = el; cur; cur = cur.parentNode) {
-        const tag = cur.nodeName?.toUpperCase();
-        if (tag === "OL" || tag === "LI" || tag === "PRE" || tag === "CODE" || /^H[1-6]$/.test(tag)) {
-          insideListOrCode = true;
-          break;
-        }
-      }
-      if (!insideListOrCode) {
-        const tag = el.nodeName?.toLowerCase();
-        if (["div", "p", "section"].includes(tag)) {
-          return true;
-        }
-        if (tag === "span") {
-          const parentText = el.parentNode?.textContent?.trim();
-          if (!parentText || parentText === text) {
-            return true;
-          }
-        }
-      }
-    }
-
     return false;
   },
-  replacement: () => "",
+  // Keep semantically valuable place labels and ordinary URLs; discard map controls,
+  // tile internals, attribution, and interactive presentation elements.
+  replacement: (_content, node) => readableWidgetSummary(node as HTMLElement),
 });
 turndown.addRule("linkInlineFilePaths", {
   filter: node => inlineFilePath(node) !== undefined,
@@ -190,30 +229,11 @@ function cleanCitationBadges(markdown: string): string {
   return markdown.replace(/\[([^\]]+?)\s*\+\d+\]\((https?:\/\/[^)]+)\)/g, "[$1]($2)");
 }
 
-function stripOrphanDigitBlocks(markdown: string): string {
-  if (!markdown.includes("```")) {
-    return markdown
-      .replace(/(?:^|\n\n)\d+(?=\n\n|$)/g, "")
-      .replace(/\n{3,}/g, "\n\n")
-      .trim();
-  }
-  const parts = markdown.split(/(```[\s\S]*?```)/g);
-  return parts
-    .map((part, index) => {
-      if (index % 2 === 1) return part;
-      return part.replace(/(?:^|\n\n)\d+(?=\n\n|$)/g, "");
-    })
-    .join("")
-    .replace(/\n{3,}/g, "\n\n")
-    .trim();
-}
-
 export function chatGptHtmlToMarkdown(html: string): string {
   if (!html.trim()) return "";
-  const cleaned = cleanCitationBadges(
+  return cleanCitationBadges(
     restoreToolCallTags(linkObsidianWikiLinks(preserveObsidianWikiLinks(turndown.turndown(html))))
   ).trim();
-  return stripOrphanDigitBlocks(cleaned);
 }
 
 export interface ChatGptMarkdownSegment {

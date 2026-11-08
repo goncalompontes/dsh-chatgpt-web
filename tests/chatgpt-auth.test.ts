@@ -10,22 +10,37 @@ function pageFor({
   responseOk = true,
   failure = false,
   malformed = false,
+  status = responseOk ? 200 : 503,
+  responses,
+  loadingProfile = false,
+}: {
+  visible?: boolean; origin?: string; session?: unknown; responseOk?: boolean; failure?: boolean;
+  malformed?: boolean; status?: number; loadingProfile?: boolean;
+  responses?: Array<{ session?: unknown; status?: number; failure?: boolean; malformed?: boolean }>;
 } = {}): Page {
+  let calls = 0;
   return {
     url: () => `${origin}/?temporary-chat=true`,
     locator: () => ({ count: async () => 1, nth: () => ({ isVisible: async () => visible }) }),
-    evaluate: async (callback: () => Promise<boolean>) => runInNewContext(`(${callback.toString()})()`, {
+    isClosed: () => false,
+    waitForTimeout: async () => {},
+    evaluate: async (callback: () => Promise<unknown>) => runInNewContext(`(${callback.toString()})()`, {
       AbortSignal,
+      document: { querySelectorAll: () => loadingProfile ? [{ textContent: "Loading profile" }] : [] },
       fetch: async (url: string, options: RequestInit) => {
         expect(url).toBe("/api/auth/session");
         expect(options.credentials).toBe("include");
+        expect(options.cache).toBe("no-store");
         expect(options.signal).toBeDefined();
-        if (failure) throw new Error("Network unavailable");
+        const current = responses?.[Math.min(calls++, responses.length - 1)];
+        if (current?.failure ?? failure) throw new Error("Network unavailable");
+        const responseStatus = current?.status ?? status;
         return {
-          ok: responseOk,
+          ok: responseStatus >= 200 && responseStatus < 300,
+          status: responseStatus,
           json: async () => {
-            if (malformed) throw new SyntaxError("Invalid JSON");
-            return session;
+            if (current?.malformed ?? malformed) throw new SyntaxError("Invalid JSON");
+            return current && "session" in current ? current.session : session;
           },
         };
       },
@@ -34,7 +49,7 @@ function pageFor({
 }
 
 test("a guest composer is not authenticated", async () => {
-  await expect(assertAuthenticatedChatGptPage(pageFor({ session: {} }))).rejects.toThrow("sign in");
+  await expect(assertAuthenticatedChatGptPage(pageFor({ session: {} }))).rejects.toThrow(/sign in/i);
 });
 
 test("authentication requires a visible composer", async () => {
@@ -49,14 +64,35 @@ test("an authenticated ChatGPT session with a composer is accepted", async () =>
   await assertAuthenticatedChatGptPage(pageFor());
 });
 
-test("authentication rejects failed session responses", async () => {
-  await expect(assertAuthenticatedChatGptPage(pageFor({ responseOk: false }))).rejects.toThrow("sign in");
-  await expect(assertAuthenticatedChatGptPage(pageFor({ failure: true }))).rejects.toThrow("sign in");
-  await expect(assertAuthenticatedChatGptPage(pageFor({ malformed: true }))).rejects.toThrow("sign in");
+test("network, server, challenge and malformed responses do not invalidate the saved login", async () => {
+  for (const config of [{ status: 503 }, { status: 403 }, { failure: true }, { malformed: true }]) {
+    await expect(assertAuthenticatedChatGptPage(pageFor(config))).rejects.toMatchObject({
+      status: 503, errorType: "server_error", code: "chatgpt_session_check_unavailable", retryable: true,
+    });
+  }
+});
+
+test("session checks recover from boot-time network failures and profile hydration", async () => {
+  await assertAuthenticatedChatGptPage(pageFor({ responses: [{ failure: true }, { session: {} }, { session: { user: { id: "restored-user" } } }] }));
+});
+
+test("an unfinished profile is not classified as an expired login", async () => {
+  await expect(assertAuthenticatedChatGptPage(pageFor({ session: {}, loadingProfile: true }))).rejects.toMatchObject({
+    status: 503, code: "chatgpt_session_check_unavailable", retryable: true,
+  });
+});
+
+test("an explicit rejected session requests login while rate limiting remains retryable", async () => {
+  await expect(assertAuthenticatedChatGptPage(pageFor({ status: 401 }))).rejects.toMatchObject({
+    status: 401, code: "chatgpt_session_expired", retryable: false,
+  });
+  await expect(assertAuthenticatedChatGptPage(pageFor({ status: 429 }))).rejects.toMatchObject({
+    status: 429, code: "rate_limit_exceeded", retryable: true,
+  });
 });
 
 test("authentication requires a nonempty string user id", async () => {
   for (const session of [null, { user: {} }, { user: { id: "" } }, { user: { id: 42 } }]) {
-    await expect(assertAuthenticatedChatGptPage(pageFor({ session }))).rejects.toThrow("sign in");
+    await expect(assertAuthenticatedChatGptPage(pageFor({ session }))).rejects.toThrow(/sign in/i);
   }
 });

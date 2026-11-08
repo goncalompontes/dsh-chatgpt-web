@@ -23,6 +23,8 @@ function responsesUsage(usage: CodexUsage | undefined): Record<string, unknown> 
     total_tokens: usageDisplayTotalTokens(usage) ?? inputTokens + usage.outputTokens,
   };
   const inputDetails: Record<string, number> = {};
+  if (usage.estimated !== undefined) out.estimated = usage.estimated;
+  if (usage.inputScope !== undefined) out.input_tokens_scope = usage.inputScope;
   if (usage.cachedInputTokens !== undefined) {
     // cached_tokens carries cache READS only, matching OpenAI semantics.
     inputDetails.cached_tokens = usage.cachedInputTokens;
@@ -99,6 +101,8 @@ export function bridgeToResponsesSSE(
      * response.completed — codex-rs collect_compaction_output requires exactly one.
      */
     compaction?: boolean;
+    /** DSH text checkpoint turn: forward invisible progress chunks, but keep normal text output. */
+    compactionProgress?: boolean;
     /** One-shot: first non-empty text/thinking/raw-reasoning delta observed (WP4 TTFT). */
     onFirstOutput?: () => void;
     onTerminal?: (status: ResponsesTerminalStatus) => void;
@@ -156,6 +160,8 @@ export function bridgeToResponsesSSE(
   let closed = false;
   let clientCancelled = false;
   let terminalReported = false;
+  let terminalEmitted = false;
+  let doneEmitted = false;
   const reportTerminal = (status: ResponsesTerminalStatus) => {
     if (terminalReported || clientCancelled || closed) return;
     terminalReported = true;
@@ -175,6 +181,7 @@ export function bridgeToResponsesSSE(
         try {
           controller.enqueue(encoder.encode(sseEvent(name, { type: name, sequence_number: seq++, ...data })));
           emittedFrames++;
+          if (name === "response.completed" || name === "response.failed" || name === "response.incomplete") terminalEmitted = true;
         } catch {
           closed = true;
         }
@@ -184,6 +191,7 @@ export function bridgeToResponsesSSE(
         try {
           controller.enqueue(encoder.encode("data: [DONE]\n\n"));
           emittedFrames++;
+          doneEmitted = true;
         } catch {
           closed = true;
         }
@@ -212,6 +220,11 @@ export function bridgeToResponsesSSE(
       let currentMsg: { itemId: string; outputIndex: number; text: string; phase?: CodexMessagePhase } | null = null;
       let currentReasoning: { itemId: string; outputIndex: number; text: string } | null = null;
       let currentRawReasoning: { itemId: string; outputIndex: number; text: string } | null = null;
+      // pi-ai ignores the transport-only response.heartbeat event. During a long DSH
+      // map/reduce compaction, turn-level heartbeat events therefore need one valid text
+      // chunk to keep pi-ai's 300s idle watchdog and compaction assembler armed. This invisible item is
+      // excluded from the compaction response output and never reaches normal turns.
+      let compactionHeartbeatItem: { itemId: string; outputIndex: number } | null = null;
       // Opaque signed-reasoning round-trip state: the signature signs the CURRENT thinking
       // block; redacted blocks are opaque payloads replayed verbatim. Attached to the reasoning
       // item as an ocxr1 encrypted_content envelope on close. hiddenThinkingText collects the
@@ -430,9 +443,37 @@ export function bridgeToResponsesSSE(
           // duplicate the summary if this response is ever replayed via previous_response_id
           // expansion (rememberResponseState stores input + output). Codex ignores extra items but
           // its compaction UI renders nothing mid-turn, so nothing is lost visually.
-          if (options?.compaction) {
-            if (event.type === "text_delta") { compactionText += event.text; continue; }
-            if (event.type !== "done" && event.type !== "incomplete" && event.type !== "error") continue;
+          if (options?.compaction || options?.compactionProgress) {
+            if (event.type === "heartbeat") {
+              if (!compactionHeartbeatItem) {
+                const itemId = `rsh_${uuid()}`;
+                compactionHeartbeatItem = { itemId, outputIndex };
+                emit("response.output_item.added", {
+                  output_index: outputIndex,
+                  item: {
+                    type: "message", id: itemId, status: "in_progress", role: "assistant",
+                    content: [{ type: "output_text", text: "", annotations: [] }],
+                  },
+                });
+                emit("response.content_part.added", {
+                  item_id: itemId, output_index: outputIndex, content_index: 0,
+                  part: { type: "output_text", text: "", annotations: [] },
+                });
+                outputIndex += 1;
+              }
+              emit("response.output_text.delta", {
+                item_id: compactionHeartbeatItem.itemId,
+                output_index: compactionHeartbeatItem.outputIndex,
+                content_index: 0,
+                // Zero-width progress is a real pi-ai stream chunk but has no visible content.
+                delta: "\u200b",
+              });
+              continue;
+            }
+            if (options.compaction) {
+              if (event.type === "text_delta") { compactionText += event.text; continue; }
+              if (event.type !== "done" && event.type !== "incomplete" && event.type !== "error") continue;
+            }
           }
           switch (event.type) {
             case "assistant_boundary": {
@@ -591,6 +632,19 @@ export function bridgeToResponsesSSE(
               // Redacted-only turns (or hidden thinking without a trailing signature event) still
               // need their envelope-only reasoning item so the blocks replay next turn.
               flushHiddenReasoningEnvelope();
+              if (options?.compaction || options?.compactionProgress) {
+                if (compactionHeartbeatItem) {
+                  emit("response.output_item.done", {
+                    output_index: compactionHeartbeatItem.outputIndex,
+                    item: {
+                      type: "message", status: "completed", role: "assistant",
+                      id: compactionHeartbeatItem.itemId,
+                      content: [{ type: "output_text", text: "\u200b", annotations: [] }],
+                    },
+                  });
+                  compactionHeartbeatItem = null;
+                }
+              }
               if (options?.compaction) {
                 // Exactly one compaction item per turn; codex-rs takes the first and fatals on 0.
                 const item = {
@@ -673,7 +727,8 @@ export function bridgeToResponsesSSE(
             }
           }
           if (terminalEvent) {
-            onCancel?.();
+            // A terminal event completes this response normally. Calling the cancellation hook
+            // here can race transport teardown with delivery of the terminal frames and [DONE].
             terminated = true;
             returnIterator();
             break;
@@ -731,6 +786,7 @@ export function bridgeToResponsesSSE(
       closed = true;
       gated = true;
       stepping = false;
+      console.info(`[bridge] stream_completed response=${responseId} terminal=${terminalReported} emitted=${terminalEmitted} done=${doneEmitted} frames=${emittedFrames}`);
       };
 
       const startStream = () => {
@@ -807,10 +863,12 @@ export function bridgeToResponsesSSE(
   const cancelStream = () => {
     // Client (Codex) disconnected. Stop emitting and let the caller abort the upstream fetch so a
     // cancelled turn does not leak the upstream stream or keep draining tokens (RC2).
+    if (clientCancelled) return;
     clientCancelled = true;
     closed = true;
     if (beat) clearInterval(beat);
-    onCancel?.();
+    console.info(`[bridge] stream_cancel response=${responseId} source=downstream terminal=${terminalEmitted} done=${doneEmitted}`);
+    if (!terminalEmitted) onCancel?.();
     returnIterator();
   };
 

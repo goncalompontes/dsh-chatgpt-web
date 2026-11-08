@@ -3,6 +3,7 @@ import {
   CHATGPT_WEB_GPT6_BACKEND_MODEL,
   CHATGPT_WEB_LUNA_BACKEND_MODEL,
 } from "../../chatgpt-web-models";
+import type { ChatGptExternalMcpConfig } from "../../types";
 
 export const CHATGPT_WEB_MODEL_ID = CHATGPT_WEB_BACKEND_MODEL;
 export const CHATGPT_WEB_GPT6_MODEL_ID = CHATGPT_WEB_GPT6_BACKEND_MODEL;
@@ -12,6 +13,8 @@ export interface ChatGptWebCapabilities {
   localToolsEnabled: boolean;
   solAvailable: boolean;
   proAvailable: boolean;
+  /** Opt-in external ChatGPT custom-MCP bridge used instead of the OpenAI tunnel. */
+  externalMcp?: ChatGptExternalMcpConfig;
 }
 
 export interface ChatGptWebModelMode {
@@ -21,6 +24,22 @@ export interface ChatGptWebModelMode {
   uiEffortIndex: 0 | 1 | 2 | 3 | 4 | null;
   thinkEnabled: boolean;
   localTools: boolean;
+}
+
+/**
+ * Context recovery is a summarization task, so use the fastest picker row from the
+ * same ChatGPT model family instead of spending the user's selected reasoning budget.
+ * This keeps a High/Medium work turn on its requested model while making DSH's
+ * multi-request map/reduce compaction finish before pi-ai's stream idle deadline.
+ */
+export function resolveChatGptWebCompactionModel(modelId: string): {
+  modelId: string;
+  reasoning: "low";
+} {
+  if (modelId === CHATGPT_WEB_GPT6_MODEL_ID) return { modelId, reasoning: "low" };
+  if (modelId === CHATGPT_WEB_MODEL_ID) return { modelId, reasoning: "low" };
+  if (modelId === CHATGPT_WEB_LUNA_MODEL_ID) return { modelId, reasoning: "low" };
+  throw new Error(`ChatGPT web compaction model is not supported: ${modelId}`);
 }
 
 export function resolveChatGptWebModelMode(

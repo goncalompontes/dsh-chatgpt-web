@@ -25,6 +25,12 @@ export interface ChatGptWebRoundEvidence {
   toolRequests?: BrokerToolRequest[];
 }
 
+/** Visible transport input only; ChatGPT does not report its retained model context usage. */
+export interface ChatGptWebInputAccounting {
+  inputTokens: number;
+  scope: "browser_submission" | "tool_results";
+}
+
 function conservativeTextTokens(text: string, modelId: string): number {
   return estimateTokens(text, modelId);
 }
@@ -109,13 +115,15 @@ export function estimateChatGptWebUsage(
   parsed: CodexParsedRequest,
   evidence: ChatGptWebRoundEvidence,
   capabilities: ChatGptWebCapabilities,
+  input?: ChatGptWebInputAccounting,
 ): CodexUsage {
-  const inputTokens = estimateChatGptWebInputTokens(parsed, capabilities);
+  const inputTokens = input?.inputTokens ?? estimateChatGptWebInputTokens(parsed, capabilities);
   const outputTokens = conservativeTextTokens(roundEvidenceText(evidence), parsed.modelId);
   return {
     inputTokens,
     outputTokens,
     totalTokens: inputTokens + outputTokens,
     estimated: true,
+    inputScope: input?.scope ?? "canonical_history",
   };
 }

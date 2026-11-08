@@ -29,7 +29,7 @@ window.__ModuleLoader__.load({
       'tuning.hint': 'Applied from the next browser turn; no sidecar restart needed. Blank = default.',
       'tuning.save': 'Save',
       'tuning.restore': 'Restore defaults',
-      'tuning.composerCharLimit': 'Composer character limit',
+      'tuning.composerCharLimit': 'Composer character limit (automatic if blank)',
       'tuning.responseDomGraceMs': 'First-token grace floor (ms)',
       'tuning.responseDomGraceMaxMs': 'First-token grace ceiling (ms)',
       'tuning.responseDomGracePerCharMs': 'Grace growth per prompt char (ms)',

@@ -32,6 +32,62 @@ const GATEWAY_AGENT_WAIT_TOOL_NAMES = new Set([
   "multi_agent_v2__wait_agent",
 ]);
 
+// DSH's core tool names are stable across the standard/minimal/cordis presets, while optional
+// bundles add a few more (goal, persistent terminals, PTC, etc.). Expose these as first-class MCP
+// tools so an external connector does not have to route every call through codex_tool_call. The
+// wrapper still carries the turn token and forwards to the exact tool registered by the live DSH
+// agent; a name that is not present in a particular profile returns an explicit availability error.
+const DIRECT_DSH_TOOL_NAMES = [
+  "bash",
+  "read",
+  "write",
+  "edit",
+  "apply_patch",
+  "read_image",
+  "glob",
+  "grep",
+  "terminal_open",
+  "terminal_list",
+  "terminal_read",
+  "terminal_send",
+  "terminal_close",
+  "terminal_signal",
+  "goal",
+  "create_goal",
+  "get_goal",
+  "update_goal",
+  "run_code",
+  "ralph",
+  "skill",
+  "str_replace_editor",
+  "load_workspace_dependencies",
+  "cordis_inspect_list",
+  "cordis_inspect_query",
+  "pwsh",
+  "todo_write",
+  "ask_user_question",
+  "list_subagent_models",
+  "interrupt_agent",
+  "list_agents",
+  "send_message",
+  "schedule_create",
+  "schedule_edit",
+  "schedule_list",
+  "schedule_view",
+  "job_kill",
+  "job_list",
+  "job_output",
+  "web_search",
+  "web_fetch",
+  "present",
+  "working_directory",
+  "session_search",
+  "session_trace",
+  "session_event_read",
+  "session_event_search",
+  "session_event_trace",
+] as const;
+
 const turnTokenSchema = z.string().min(20).max(256);
 const jsonArgumentsSchema = z.record(z.string(), z.unknown()).default({});
 export const CHATGPT_WEB_AGENT_WAIT_POLL_MS = 10_000;
@@ -604,6 +660,65 @@ export async function runChatGptMcpServer(options: {
       input: execGatewayProgram(nestedToolName, freeform, payload, bound.tools.map(wireName)),
     }, signal);
   };
+
+  if (contract === "native") {
+    for (const directName of DIRECT_DSH_TOOL_NAMES) {
+      server.registerTool(
+        directName,
+        {
+          title: `DSH ${directName}`,
+          description: `Invoke the live DSH ${directName} tool directly. Pass its native arguments in the arguments object and include the turn_token issued in the prompt. This is the DSH runtime surface; local-shell tools are intentionally not involved.`,
+          inputSchema: {
+            turn_token: turnTokenSchema,
+            arguments: jsonArgumentsSchema.optional(),
+            input: z.string().max(5_000_000).optional(),
+          },
+          annotations: {
+            readOnlyHint: [
+              "read", "read_image", "glob", "grep", "terminal_list", "terminal_read",
+              "get_goal", "list_subagent_models", "session_search", "session_trace",
+              "session_event_read", "session_event_search", "session_event_trace",
+            ].includes(directName),
+            destructiveHint: ![
+              "read", "read_image", "glob", "grep", "terminal_list", "terminal_read",
+              "get_goal", "list_subagent_models", "session_search", "session_trace",
+              "session_event_read", "session_event_search", "session_event_trace",
+            ].includes(directName),
+            idempotentHint: false,
+            openWorldHint: true,
+          },
+        },
+        async (input, extra) => withClaimedTurn(
+          directName,
+          input.turn_token,
+          extra,
+          async claimed => {
+            const bound = claimed.environment;
+            const tool = safeVisibleTools(bound, contract)
+              .find(candidate => wireName(candidate) === directName);
+            if (!tool) {
+              throw new Error(`DSH tool is not available in this turn: ${directName}`);
+            }
+            const args = input.arguments ?? {};
+            if (tool.freeform) {
+              if (input.input === undefined) {
+                throw new Error(`DSH freeform tool ${directName} requires input`);
+              }
+              if (Object.keys(args).length > 0) {
+                throw new Error(`DSH freeform tool ${directName} accepts input instead of arguments`);
+              }
+              return invoke(claimed.bindingId, bound, tool, { input: input.input }, extra.signal);
+            }
+            if (input.input !== undefined) {
+              throw new Error(`DSH function tool ${directName} accepts arguments instead of input`);
+            }
+            assertBrowserToolArguments(tool, args);
+            return invoke(claimed.bindingId, bound, tool, { arguments: args }, extra.signal);
+          },
+        ),
+      );
+    }
+  }
 
   server.registerTool(
     "codex_exec",

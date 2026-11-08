@@ -30,6 +30,7 @@ import {
 } from "./config";
 import { AsyncEventQueue } from "./event-queue";
 import { readJsonRequestBody } from "./http-body";
+import { isLegacyDshTextCompaction } from "./responses/dsh-context";
 import { httpStatusFromTerminalError } from "./lib/errors";
 import { augmentNativeModelCatalog } from "./model-catalog";
 import {
@@ -74,6 +75,7 @@ export interface HttpStreamFailureEvidence {
   bytes: number;
   errorName: string;
   errorCode: string;
+  stage?: "read" | "enqueue" | "cancel";
 }
 
 type HttpStreamFailureReporter = (evidence: HttpStreamFailureEvidence) => void;
@@ -213,6 +215,7 @@ export class HttpTurnCounter {
     let released = false;
     let clientAbortListener: (() => void) | undefined;
     let streamAbortListener: (() => void) | undefined;
+    let terminalSeen = false;
     const release = () => {
       if (released) return;
       released = true;
@@ -224,7 +227,7 @@ export class HttpTurnCounter {
       if (streamAbortListener) abort.signal.removeEventListener("abort", streamAbortListener);
       finish();
     };
-    clientAbortListener = () => abort.abort(clientSignal?.reason);
+    clientAbortListener = () => { if (!terminalSeen) abort.abort(clientSignal?.reason); };
     if (clientSignal?.aborted) abort.abort(clientSignal.reason);
     else clientSignal?.addEventListener("abort", clientAbortListener, { once: true });
 
@@ -259,25 +262,56 @@ export class HttpTurnCounter {
         const reportStreamFailure = this.reportStreamFailure;
         let chunks = 0;
         let bytes = 0;
+        let stopped = false;
+        let downstreamController: ReadableStreamDefaultController<Uint8Array>;
+        let doneSeen = false;
+        let sseTail = "";
+        const decoder = new TextDecoder();
+        const observe = (value: Uint8Array) => {
+          if (endpoint !== "responses") return;
+          const text = sseTail + decoder.decode(value, { stream: true });
+          if (/(?:^|\n)event: response\.(?:completed|failed|incomplete)\r?\n/.test(text)) terminalSeen = true;
+          if (/(?:^|\n)data: \[DONE\]\r?\n/.test(text)) doneSeen = true;
+          sseTail = text.slice(-128);
+        };
+        const cancelReader = async (reason: unknown, source: string) => {
+          if (stopped) return;
+          stopped = true;
+          console.info(`[dsh-chatgpt-web] http_stream_cancel turn=${id} source=${source} terminal=${terminalSeen} done=${doneSeen}`);
+          try { await reader.cancel(reason); }
+          catch (error) {
+            emitHttpStreamFailure(reportStreamFailure, { ...streamFailureEvidence(error, id, endpoint, "client", platform, chunks, bytes), stage: "cancel" });
+          } finally { release(); }
+        };
         streamAbortListener = () => {
-          void reader.cancel(abort.signal.reason).catch(() => {}).finally(release);
+          // Cancelling the inner reader resolves its read, but does not settle a pending
+          // read on the outer stream. Explicit interruption must terminate both sides.
+          if (!stopped) downstreamController.error(abort.signal.reason);
+          void cancelReader(abort.signal.reason, "abort_signal");
         };
         abort.signal.addEventListener("abort", streamAbortListener, { once: true });
         const body = new ReadableStream<Uint8Array>({
+          start(controller) { downstreamController = controller; },
           async pull(controller) {
+            let stage: "read" | "enqueue" = "read";
             try {
               const chunk = await reader.read();
+              if (stopped) return;
               if (chunk.done) {
+                stopped = true;
                 release();
                 controller.close();
+                console.info(`[dsh-chatgpt-web] http_stream_completed turn=${id} endpoint=${endpoint} terminal=${terminalSeen} done=${doneSeen} chunks=${chunks} bytes=${bytes}`);
                 return;
               }
               chunks += 1;
               bytes += chunk.value.byteLength;
+              observe(chunk.value);
+              stage = "enqueue";
               controller.enqueue(chunk.value);
             } catch (error) {
-              if (!abort.signal.aborted) {
-                emitHttpStreamFailure(reportStreamFailure, streamFailureEvidence(
+              if (!stopped && !abort.signal.aborted) {
+                emitHttpStreamFailure(reportStreamFailure, { ...streamFailureEvidence(
                   error,
                   id,
                   endpoint,
@@ -285,18 +319,18 @@ export class HttpTurnCounter {
                   platform,
                   chunks,
                   bytes,
-                ));
+                ), stage });
+                // The stage distinguishes source read failures from transport teardown races.
+                stopped = true;
+                release();
+                try { controller.error(error); } catch { /* already cancelled */ }
+                return;
               }
               release();
-              controller.error(error);
             }
           },
           async cancel(reason) {
-            try {
-              await reader.cancel(reason);
-            } finally {
-              release();
-            }
+            await cancelReader(reason, "downstream");
           },
         });
         return new Response(body, {
@@ -490,6 +524,34 @@ export async function responseRequest(
   let route: ChatGptWebModelRoute;
   try {
     parsed = parseRequest(expanded);
+    if (config.purpose === "dsh") {
+      const sessionId = req.headers.get("x-dsh-session-id");
+      const purpose = req.headers.get("x-dsh-request-purpose");
+      if (sessionId && /^[A-Za-z0-9_.:-]{1,200}$/.test(sessionId)) {
+        const body = parsed._rawBody as Record<string, unknown>;
+        parsed._rawBody = { ...body, _dshSessionId: sessionId };
+      }
+      if (purpose && /^[A-Za-z0-9_.:-]{1,100}$/.test(purpose)) parsed._dshRequestPurpose = purpose;
+      // Some DSH hosts use the Responses compaction endpoint, which arrives with
+      // `compaction_trigger` but cannot carry the auxiliary purpose header through
+      // older pi-ai adapters. Treat that endpoint as the text checkpoint protocol;
+      // the native synthetic compaction envelope is not useful to DSH and would
+      // otherwise enter the retained-conversation handoff path.
+      if (parsed._compactionRequest && parsed._dshRequestPurpose === "compaction") {
+        parsed._dshRequestPurpose = "compaction";
+        parsed._compactionRequest = undefined;
+      }
+      if (isLegacyDshTextCompaction(parsed)) {
+        parsed._dshRequestPurpose = "compaction";
+        console.info("[chatgpt-web] dsh_compaction_detected source=native_directive missing_purpose_header=true");
+      }
+      if (parsed._dshRequestPurpose === "compaction") {
+        // DSH expects a text checkpoint, not Codex's synthetic compaction output item.
+        delete parsed.context.tools;
+        delete parsed.options.toolChoice;
+        delete parsed.options.parallelToolCalls;
+      }
+    }
     route = routeChatGptWebRequest(parsed, config);
     const identity = extractChatGptTurnIdentity(parsed);
     if (identity.threadId && identity.turnId) {
@@ -606,6 +668,7 @@ export async function responseRequest(
           ? { stallTimeoutSec: provider.chatgptWeb.stallTimeoutSec }
           : {}),
         ...(compaction ? { compaction: true } : {
+          ...(parsed._dshRequestPurpose === "compaction" ? { compactionProgress: true } : {}),
           ...(options.rememberState === false ? {} : {
             onCompletedResponse: (response: Record<string, unknown>) => rememberResponseState(parsed._rawBody, response, { force: true }),
           }),
@@ -706,6 +769,7 @@ export async function compactRequest(
   const input = Array.isArray(raw.input) ? raw.input : [];
   const headers = new Headers(req.headers);
   headers.set("content-type", "application/json");
+  if (config.purpose === "dsh") headers.set("x-dsh-request-purpose", "compaction");
   const internal = new Request("http://127.0.0.1/v1/responses", {
     method: "POST",
     headers,
@@ -737,6 +801,27 @@ export async function compactRequest(
   }
   if (body.status !== "completed") {
     return formatErrorResponse(502, "upstream_error", `Compaction turn failed (status: ${String(body.status ?? "unknown")})`);
+  }
+  // DSH's text checkpoint protocol intentionally returns a normal assistant
+  // message. The generic Responses compaction endpoint still needs to expose
+  // the v1 replacement-history shape to its caller, so adapt that message here.
+  if (config.purpose === "dsh") {
+    const summary = (body.output ?? [])
+      .filter((item): item is Record<string, unknown> => Boolean(item && typeof item === "object" && !Array.isArray(item)))
+      .filter(item => item.type === "message")
+      .flatMap(item => {
+        const content = item.content;
+        if (typeof content === "string") return [content];
+        if (!Array.isArray(content)) return [];
+        return content
+          .filter((part): part is Record<string, unknown> => Boolean(part && typeof part === "object" && !Array.isArray(part)))
+          .filter(part => part.type === "output_text" || part.type === "text")
+          .map(part => typeof part.text === "string" ? part.text : "");
+      })
+      .join("")
+      .trim();
+    if (!summary) return formatErrorResponse(502, "invalid_response_error", "DSH compaction turn produced an empty summary");
+    return Response.json({ output: buildCompactV1Output(extractCompactUserMessages(input), summary) });
   }
   const items = (body.output ?? []).filter(
     (item): item is { type: "compaction"; encrypted_content?: string } =>

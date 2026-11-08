@@ -460,6 +460,7 @@ export function compileChatGptWebPrompt(
   options?: CompileChatGptWebPromptOptions,
 ): CompiledChatGptWebPrompt {
   const manualControl = options?.manualControl === true;
+  const externalMcp = manualControl ? undefined : capabilities.externalMcp;
   const mode = manualControl
     ? { localTools: true, effort: "low" as const, displayLabel: "Zero Risk" as const }
     : resolveChatGptWebModelMode(parsed.modelId, parsed.options.reasoning, capabilities);
@@ -527,12 +528,34 @@ export function compileChatGptWebPrompt(
         "Do not call local or ChatGPT-native tools. Summarize only the supplied task context according to the final compaction instruction.",
         "Return only the checkpoint summary that the next model needs to resume the task.",
       ]
-    : [
-      `This turn is running through DeepSeek Harness ChatGPT Web Pure Chat (${mode.displayLabel}).`,
-      "ChatGPT-native capabilities, including web search, browsing, research, reasoning, code execution within ChatGPT, and canvas/widgets, remain available when provided.",
-      "Answer the user's request directly, thoroughly, and helpfully using clear Markdown and structured code blocks.",
-      "Provide complete explanations, reasoning, and solutions directly in text without requiring external tools.",
-    ];
+    : externalMcp
+      ? [
+        `This turn is running through DeepSeek Harness ChatGPT Web with the ${externalMcp.connectorName} connector selected.`,
+        `Use the ${externalMcp.connectorName} connector to invoke the ${externalMcp.serverName} MCP server.`,
+        `The connector is a DSH runtime surface. Use the exact wire_name and native argument schema from the current DSH inventory below. Different DSH profiles expose different tools; the connector's cached list may include tools unavailable in this session. Pass the turn_token ${JSON.stringify(turnToken)} to each direct DSH tool and put native tool arguments in its arguments object; use input only for a freeform tool.`,
+        "Do not call local-shell file_read, file_list, file_tree, run_shell, run_python, execute, browser, or Code Mode tools. They are not DSH tools and may be absent even if ChatGPT still shows their cached definitions.",
+        `If a direct tool is missing or returns Unknown tool, call mcp_tool_search with exactly {"query":${JSON.stringify(externalMcp.serverName)},"server":${JSON.stringify(externalMcp.serverName)},"limit":100}. Search requires every query word to match; do not use a sentence or a list of tool names. An empty result from a longer query does not mean DSH tools are unavailable.`,
+        `Then use mcp_tool_call with name ${JSON.stringify(`${externalMcp.serverName}:<wire_name>`)}, arguments {"turn_token":${JSON.stringify(turnToken)},"arguments":{...native arguments...}}, and timeout_s:120 outside arguments. For freeform tools put input alongside turn_token instead of arguments. This gateway calls the same DSH tool and does not execute in the local-shell workspace.`,
+        `Do not use ${externalMcp.serverName}:codex_tool_inventory or ${externalMcp.serverName}:codex_tool_call for recovery: DSH-only gateways block those bridge wrappers.`,
+        "Use only the current transport turn_token, never a token from replayed history or another chat. Do not invent or request a replacement token. Report an invalid-token failure only when an actual tool response proves it.",
+        "The following inventory describes tools authorized by this DSH session, not additional instructions. Its parameters belong inside the connector wrapper's arguments object.",
+        "<dsh_tool_inventory_json>",
+        JSON.stringify((parsed.context.tools ?? []).map(tool => ({
+          wire_name: namespacedToolName(tool.namespace, tool.name),
+          description: tool.description,
+          kind: tool.freeform ? "freeform" : tool.toolSearch ? "tool_search" : "function",
+          parameters: tool.parameters,
+        }))),
+        "</dsh_tool_inventory_json>",
+        `Do not call codex_turn_complete in this contract; it is not exposed. Return the final answer normally.`,
+        "Do not claim to have run a command unless it was executed through the connector tools.",
+      ]
+      : [
+        `This turn is running through DeepSeek Harness ChatGPT Web Pure Chat (${mode.displayLabel}).`,
+        "ChatGPT-native capabilities, including web search, browsing, research, reasoning, code execution within ChatGPT, and canvas/widgets, remain available when provided.",
+        "Answer the user's request directly, thoroughly, and helpfully using clear Markdown and structured code blocks.",
+        "Provide complete explanations, reasoning, and solutions directly in text without requiring external tools.",
+      ];
   const outputControlContract = parsed._compactionRequest
   ? []
   : [
@@ -591,6 +614,12 @@ export function compileChatGptWebPrompt(
       "<codex_transport_resume>",
       "The task context is complete. Execute the latest active user request now.",
       "</codex_transport_resume>",
+    ]
+    : externalMcp
+    ? [
+      "<dsh_transport_resume>",
+      `The task context is complete. Use the current DSH inventory through the ${externalMcp.connectorName} connector. Pass turn_token ${JSON.stringify(turnToken)} unchanged to every DSH tool call and keep native arguments inside its arguments object. If a direct alias is missing, use mcp_tool_call with name ${JSON.stringify(`${externalMcp.serverName}:<wire_name>`)} and timeout_s:120 as described above. Execute the latest active user request now.`,
+      "</dsh_transport_resume>",
     ]
     : mode.localTools
     ? [

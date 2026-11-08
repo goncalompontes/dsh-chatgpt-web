@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { homedir } from "node:os";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import { isReadableCompactionSummaryText, OPAQUE_COMPACTION_NOTE } from "../../responses/compaction";
+import { isDshCompactionSummaryText } from "../../responses/dsh-context";
 import type { CodexContentPart, CodexParsedRequest, CodexTool } from "../../types";
 import { CHATGPT_WEB_LUNA_MODEL_ID } from "./model";
 
@@ -105,11 +106,20 @@ export function hasRawChatGptEnvironmentContext(parsed: CodexParsedRequest): boo
   });
 }
 
-function contextualUserMessage(value: Record<string, unknown>): boolean {
+function contextualUserMessage(value: Record<string, unknown>, dsh = false): boolean {
   const text = rawMessageText(value).trim();
+  // pi-ai projects these DSH producer messages into user-role text. They update context,
+  // not the human revision owning a pending tool call. This never grants filesystem authority.
   return /^<environment_context>[\s\S]*<\/environment_context>$/.test(text)
     || /^<subagent_notification>[\s\S]*<\/subagent_notification>$/.test(text)
+    || (dsh && (text.startsWith("Current runtime context. This snapshot supersedes earlier runtime-context snapshots.")
+      || /^<system-reminder>\s*A skill is a reusable set[\s\S]*<available_skills>/.test(text)
+      || /^<system-reminder>\s*The following workspace instructions may be relevant to your work\./.test(text)
+      || /^<system-reminder>\s*Additional instructions from: [^\n]+\n/.test(text)
+      || /^Time sampled while preparing turn \d+, step \d+:/.test(text)
+      || /^The working directory changed from "[^\n]+" to "[^\n]+"\.$/.test(text)))
     || isReadableCompactionSummaryText(text)
+    || isDshCompactionSummaryText(text)
     || text === OPAQUE_COMPACTION_NOTE;
 }
 
@@ -157,6 +167,7 @@ export function extractChatGptTurnUserRevision(parsed: CodexParsedRequest): unkn
 
 function latestChatGptTurnUserRevision(parsed: CodexParsedRequest, expectedTurnId?: string): ChatGptTurnUserRevision | undefined {
   const body = record(parsed._rawBody);
+  const dsh = !extractCodexTurnIdentityFromBody(body).turnId;
   const input = Array.isArray(body?.input) ? body.input : [];
   for (let index = input.length - 1; index >= 0; index -= 1) {
     const item = record(input[index]);
@@ -171,7 +182,7 @@ function latestChatGptTurnUserRevision(parsed: CodexParsedRequest, expectedTurnI
       && expectedTurnId !== undefined
       && messageTurnId !== undefined
       && messageTurnId !== expectedTurnId) continue;
-    if (contextualUserMessage(item)) continue;
+    if (contextualUserMessage(item, dsh)) continue;
     return { content: item.content, ...(messageTurnId ? { turnId: messageTurnId } : {}) };
   }
   for (let index = parsed.context.messages.length - 1; index >= 0; index -= 1) {
@@ -609,14 +620,41 @@ export function extractChatGptTurnEnvironment(parsed: CodexParsedRequest): ChatG
 export function extractChatGptTurnIdentity(parsed: CodexParsedRequest): ChatGptTurnIdentity {
   const body = record(parsed._rawBody);
   const base = extractCodexTurnIdentityFromBody(body);
-  if (!base.turnId && parsed.modelId === CHATGPT_WEB_LUNA_MODEL_ID) {
+  // Native Codex carries turn identity in client_metadata. DSH's pi-ai client sends the same
+  // Responses payload without that metadata, so derive a stable identity the way the Luna route
+  // already does: the prompt-cache key names the session, and the message hash names the turn.
+  if (!base.turnId) {
+    const input = body?.input;
+    const items = Array.isArray(input) ? input : [];
+    let userIndex = -1;
+    for (let i = items.length - 1; i >= 0; i--) {
+      const item = record(items[i]);
+      if (item?.role === "user" && (item.type === "message" || !item.type) && !contextualUserMessage(item, true)) {
+        userIndex = i;
+        break;
+      }
+    }
+    // Hash only the current user message. Replayed or compacted history can change between
+    // Responses continuations, while the current instruction remains the stable turn revision.
+    // Tool calls and outputs appended by subsequent requests must not change the turn identity.
+    const identityInput = userIndex >= 0 ? record(items[userIndex])?.content : input;
+    // Repeating the same instruction later in a session must open a new turn as well.
+    const occurrence = items.slice(0, userIndex + 1).filter(value => {
+      const item = record(value);
+      return item?.role === "user" && !contextualUserMessage(item, true)
+        && JSON.stringify(item.content) === JSON.stringify(identityInput);
+    }).length;
     const contentHash = createHash("sha256")
-      .update(JSON.stringify(parsed.context.messages))
+      .update(JSON.stringify([body?.prompt_cache_key ?? null, identityInput ?? null, occurrence]))
       .digest("hex")
       .slice(0, 16);
+    const cacheKey = typeof body?.prompt_cache_key === "string" ? body.prompt_cache_key : undefined;
+    const turnPrefix = parsed.modelId === CHATGPT_WEB_LUNA_MODEL_ID ? "dsh-luna" : `dsh-${parsed.modelId}`;
     return {
-      threadId: base.threadId ?? "dsh-session",
-      turnId: `dsh-luna-${contentHash}`,
+      threadId: base.threadId ?? (typeof body?._dshSessionId === "string"
+        ? `dsh-${body._dshSessionId}${parsed._dshRequestPurpose ? `-${parsed._dshRequestPurpose}` : ""}`
+        : cacheKey) ?? "dsh-session",
+      turnId: `${turnPrefix}-${contentHash}`,
       ...(base.parentThreadId ? { parentThreadId: base.parentThreadId } : {}),
       ...(base.agentName ? { agentName: base.agentName } : {}),
       ...(base.subagentKind ? { subagentKind: base.subagentKind } : {}),
