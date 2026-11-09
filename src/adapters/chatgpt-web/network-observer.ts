@@ -53,7 +53,7 @@ export function installChatGptNetworkObserverInPage(): void {
     /\/backend-api\/(?:f\/)?conversation(?:[?#]|$)/.test(url)
   );
 
-  scope.fetch = async function capturedFetch(...args: Parameters<typeof fetch>): Promise<Response> {
+  scope.fetch = (async function capturedFetch(this: typeof globalThis, ...args: Parameters<typeof fetch>): Promise<Response> {
     const response = await originalFetch.apply(this, args);
     try {
       const input = args[0];
@@ -108,7 +108,7 @@ export function installChatGptNetworkObserverInPage(): void {
       // Observation must never break the page's request.
       return response;
     }
-  };
+  }) as typeof fetch;
 }
 
 /** Install the tee for the current page (idempotent) and for every later navigation. */
