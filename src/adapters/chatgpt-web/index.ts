@@ -1269,13 +1269,26 @@ export function createChatGptWebAdapter(
               }
               const handoffError = error instanceof Error ? error : new Error(String(error));
               console.error("[chatgpt-web] structured context handoff failed:", handoffError);
+              const handoffCode = handoffError instanceof ChatGptWebAdapterError
+                ? handoffError.code
+                : classifyChatGptTurnFailure({
+                  phase: "accepted",
+                  message: handoffError.message,
+                }).code;
+              // Compaction has no side-effecting tool calls, so a transient surface loss is safe
+              // to retry on a fresh request. The handler already tried one fresh surface above;
+              // surfacing this as retryable lets the caller make the bounded second attempt.
+              const retryableHandoff = compactionFailureNeedsFreshSurface(handoffCode)
+                || (handoffError instanceof ChatGptWebAdapterError && handoffError.retryable);
               emit({
                 type: "error",
-                message: "ChatGPT did not complete the context handoff. Retry the task.",
-                status: 409,
-                errorType: "invalid_request_error",
-                code: "compaction_handoff_failed",
-                retryable: false,
+                message: retryableHandoff
+                  ? "ChatGPT did not complete the context handoff on this surface. Retry the compaction."
+                  : "ChatGPT did not complete the context handoff. Retry the task.",
+                status: retryableHandoff ? 503 : 409,
+                errorType: retryableHandoff ? "server_error" : "invalid_request_error",
+                code: retryableHandoff ? "compaction_handoff_retryable" : "compaction_handoff_failed",
+                retryable: retryableHandoff,
               });
               return;
             }
