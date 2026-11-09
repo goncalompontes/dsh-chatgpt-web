@@ -118,12 +118,14 @@ function messageFromValue(value: unknown): ChatGptNetworkStreamMessage | undefin
   const metadata = isObject(message.metadata) ? message.metadata : undefined;
   const channel = asString(message.channel) ?? asString(metadata?.channel);
   const recipient = asString(message.recipient);
+  // ChatGPT marks an in-flight message as visually hidden and flips it later. A final-channel
+  // assistant message is visible even while that flag is still true.
   const hidden = role === "system"
     || role === "user"
     || role === "tool"
     || channel === "analysis"
-    || metadata?.is_visually_hidden_from_conversation === true
-    || recipient === "web.run";
+    || recipient === "web.run"
+    || (metadata?.is_visually_hidden_from_conversation === true && channel !== "final");
   return {
     id,
     role,
@@ -445,4 +447,42 @@ export function parseChatGptNetworkStream(body: string): ChatGptNetworkStreamSta
   parser.push(body);
   parser.finish();
   return parser.snapshot();
+}
+
+export interface ChatGptFinalTextChoice {
+  text: string;
+  /** Text that has not been emitted yet and must be streamed to the client. */
+  appendedDelta: string;
+  source: "dom" | "network" | "network_suffix";
+}
+
+/**
+ * Pick the final answer between the DOM projection and the network stream.
+ *
+ * The network wins only when it can prove the DOM text is absent or a strict prefix. A mismatch
+ * keeps the DOM answer because the two projections may legitimately differ (rendering widgets,
+ * media, or checkpoint markers) and duplicating text is worse than keeping the current answer.
+ */
+export function chooseChatGptFinalText(options: {
+  domMarkdown: string;
+  networkText?: string;
+  /** Luna checkpoints parse markers from the DOM projection; never replace them. */
+  checkpoint: boolean;
+}): ChatGptFinalTextChoice {
+  const dom = options.domMarkdown;
+  const network = options.networkText?.trim() ?? "";
+  if (options.checkpoint || !network) {
+    return { text: dom, appendedDelta: "", source: "dom" };
+  }
+  if (!dom) {
+    return { text: network, appendedDelta: network, source: "network" };
+  }
+  if (network.startsWith(dom) && network.length > dom.length) {
+    return {
+      text: network,
+      appendedDelta: network.slice(dom.length),
+      source: "network_suffix",
+    };
+  }
+  return { text: dom, appendedDelta: "", source: "dom" };
 }

@@ -84,7 +84,11 @@ import {
 } from "../../chatgpt-web-models";
 import { LauncherBrowserHelperClient } from "./launcher-helper-client";
 import { MAX_CHATGPT_BROWSER_TABS } from "./concurrency";
-import { ChatGptNetworkStreamParser, type ChatGptNetworkStreamState } from "./network-stream";
+import {
+  ChatGptNetworkStreamParser,
+  chooseChatGptFinalText,
+  type ChatGptNetworkStreamState,
+} from "./network-stream";
 import {
   installChatGptNetworkObservation,
   installChatGptNetworkObserverInPage,
@@ -5414,12 +5418,14 @@ export class ChatGptBrowserWorker {
           networkBufferChars = stream.buffer.length;
           if (delta) networkParser.push(delta);
           networkState = networkParser.snapshot();
-          if (stream.error) {
-            networkState = {
-              ...networkState,
-              status: "error",
-              error: { message: stream.error },
-            };
+          // A reader abort is not a provider error: the page can abort a fetch on navigation or
+          // teardown. Only an explicit SSE error event is authoritative; the DOM remains the
+          // fallback witness for that turn.
+          if (stream.error && !networkReadFaults) {
+            networkReadFaults += 1;
+            console.warn(
+              `[chatgpt-web] network_stream reader ended trace=${turn.traceId}: ${stream.error}`,
+            );
           }
           if (!networkCompletionLogged && networkState.status === "complete") {
             networkCompletionLogged = true;
@@ -5429,6 +5435,54 @@ export class ChatGptBrowserWorker {
               + ` conversation=${networkState.conversationId ? "present" : "none"}`
               + ` message=${networkState.messageId ? "present" : "none"}`,
             );
+            if (networkState.text.length === 0 && stream.buffer.length > 0) {
+              const eventNames = [...new Set(stream.buffer
+                .split("\n")
+                .filter(line => line.startsWith("event:"))
+                .map(line => line.slice("event:".length).trim()))];
+              console.warn(
+                `[chatgpt-web] network_stream empty text trace=${turn.traceId}`
+                + ` bytes=${stream.buffer.length} events=${eventNames.join(",") || "none"}`,
+              );
+              if (process.env.DSH_CHATGPT_NETWORK_DEBUG === "1") {
+                const summary: unknown[] = [];
+                for (const frame of stream.buffer.split("\n\n")) {
+                  const dataLine = frame.split("\n").find(line => line.startsWith("data:"));
+                  if (!dataLine) continue;
+                  try {
+                    const payload = JSON.parse(dataLine.slice(5).trim()) as Record<string, unknown>;
+                    const value = payload.v as Record<string, unknown> | undefined;
+                    const message = value && typeof value === "object"
+                      ? (value.message as Record<string, unknown> | undefined) ?? value
+                      : undefined;
+                    if (message && typeof message === "object" && "author" in message) {
+                      const author = message.author as Record<string, unknown> | undefined;
+                      const content = message.content as Record<string, unknown> | undefined;
+                      const metadata = message.metadata as Record<string, unknown> | undefined;
+                      summary.push({
+                        p: typeof payload.p === "string" ? payload.p : "-",
+                        o: typeof payload.o === "string" ? payload.o : "-",
+                        role: author?.role,
+                        channel: message.channel,
+                        hidden: metadata?.is_visually_hidden_from_conversation,
+                        parts: Array.isArray(content?.parts) ? content.parts.length : 0,
+                        partChars: Array.isArray(content?.parts)
+                          ? content.parts.map(part => typeof part === "string" ? part.length : 0)
+                          : [],
+                      });
+                    } else if (typeof payload.v === "string" || payload.p !== undefined || payload.o !== undefined) {
+                      summary.push({
+                        p: typeof payload.p === "string" ? payload.p : "-",
+                        o: typeof payload.o === "string" ? payload.o : "-",
+                        vType: typeof payload.v,
+                        vLen: typeof payload.v === "string" ? payload.v.length : undefined,
+                      });
+                    }
+                  } catch {}
+                }
+                console.warn(`[chatgpt-web] network_stream events=${JSON.stringify(summary.slice(-30))}`);
+              }
+            }
           }
           return networkState;
         } catch (error) {
@@ -5699,19 +5753,14 @@ export class ChatGptBrowserWorker {
               if (completed.captured) turn.onLunaCheckpoint!(completed.captured);
               else console.warn(`[chatgpt-web] browser turn ${turn.traceId} completed without a Luna rolling checkpoint; preserving full native history`);
               finalText = completed.answer;
-            } else if (networkFinalText && !final.markdown) {
-              // The DOM never exposed a serializable answer; the stream is authoritative.
-              emitMarkdownDelta(networkFinalText);
-              finalText = networkFinalText;
-            } else if (networkFinalText
-              && final.markdown
-              && networkFinalText.startsWith(final.markdown)
-              && networkFinalText.length > final.markdown.length) {
-              // Recover a truncated DOM projection without duplicating the already-streamed prefix.
-              emitMarkdownDelta(networkFinalText.slice(final.markdown.length));
-              finalText = networkFinalText;
             } else {
-              finalText = final.markdown;
+              const choice = chooseChatGptFinalText({
+                domMarkdown: final.markdown,
+                networkText: networkFinalText,
+                checkpoint: false,
+              });
+              if (choice.appendedDelta) emitMarkdownDelta(choice.appendedDelta);
+              finalText = choice.text;
             }
             if (networkFinalText) {
               console.info(

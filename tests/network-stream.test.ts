@@ -117,3 +117,26 @@ test("appendText recognizes cumulative and incremental fragments", () => {
   expect(appendText("abc", "abcd")).toBe("abcd");
   expect(appendText("abcd", "cd")).toBe("abcd");
 });
+
+test("a final assistant message stays visible while ChatGPT's in-flight hidden flag is set", () => {
+  const body = sse([
+    'event: delta\ndata: {"p":"","o":"add","v":{"message":{"id":"m1","author":{"role":"assistant"},"content":{"parts":[""]},"channel":"final","metadata":{"is_visually_hidden_from_conversation":true}}}}',
+    'event: delta\ndata: {"p":"/message/content/parts/0","o":"append","v":"SOAK_0"}',
+    "data: [DONE]",
+  ]);
+  expect(parseChatGptNetworkStream(body).text).toBe("SOAK_0");
+});
+
+test("chooseChatGptFinalText prefers the stream only for absent or truncated DOM text", async () => {
+  const { chooseChatGptFinalText } = await import("../src/adapters/chatgpt-web/network-stream");
+  expect(chooseChatGptFinalText({ domMarkdown: "", networkText: "network", checkpoint: false }))
+    .toEqual({ text: "network", appendedDelta: "network", source: "network" });
+  expect(chooseChatGptFinalText({ domMarkdown: "SOAK_0", networkText: "SOAK_0", checkpoint: false }))
+    .toEqual({ text: "SOAK_0", appendedDelta: "", source: "dom" });
+  expect(chooseChatGptFinalText({ domMarkdown: "SOAK", networkText: "SOAK_0", checkpoint: false }))
+    .toEqual({ text: "SOAK_0", appendedDelta: "_0", source: "network_suffix" });
+  expect(chooseChatGptFinalText({ domMarkdown: "dom", networkText: "different", checkpoint: false }))
+    .toEqual({ text: "dom", appendedDelta: "", source: "dom" });
+  expect(chooseChatGptFinalText({ domMarkdown: "dom", networkText: "dom", checkpoint: true }))
+    .toEqual({ text: "dom", appendedDelta: "", source: "dom" });
+});
