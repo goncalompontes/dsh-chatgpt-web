@@ -1,6 +1,17 @@
 import { chatGptWebTraceId, createChatGptWebAdapter } from "./adapters/chatgpt-web";
 import { closeChatGptBrowserWorkers } from "./adapters/chatgpt-web/browser-worker";
 import { closeTurnBrokers, TurnBroker } from "./adapters/chatgpt-web/turn-broker";
+import { forwardNativeCodexRequest, type NativeCodexEndpoint, type NativeFetch } from "./native-passthrough";
+import {
+  NativeCodexUnavailableError,
+  loadNativeCodexCredential,
+  nativeCodexHeaders,
+} from "./native-codex-auth";
+import {
+  isNativeCodexModel,
+  nativeCodexBrowserFallback,
+  resolveNativeCodexConfig,
+} from "./native-codex-route";
 import { timingSafeEqual, createHash } from "node:crypto";
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
@@ -45,7 +56,6 @@ import {
   requireChatGptWebModelRoute,
   type ChatGptWebModelRoute,
 } from "./chatgpt-web-models";
-import { forwardNativeCodexRequest, type NativeFetch } from "./native-passthrough";
 import {
   buildCompactV1Output,
   COMPACT_PROMPT,
@@ -402,6 +412,8 @@ export interface ResponseRequestOptions {
   onAdapterEvent?: (event: AdapterEvent) => void;
   /** Bind the physical HTTP stream to the exact native Codex turn that owns it. */
   onTurnIdentity?: (identity: NativeCodexTurnIdentity) => void;
+  /** Test seam for the native Codex subscriber; production uses global fetch. */
+  nativeFetch?: NativeFetch;
 }
 
 export function routeChatGptWebRequest(parsed: CodexParsedRequest, config: AppConfig): ChatGptWebModelRoute {
@@ -422,15 +434,25 @@ export async function modelsRequest(
   contextOverride?: () => CodexModelContextOverride | undefined,
 ): Promise<Response> {
   if (config.purpose === "dsh") {
-    return Response.json({
-      object: "list",
-      data: availableChatGptWebModelRoutes(config).map(route => ({
-        id: route.slug,
-        object: "model",
-        created: 0,
-        owned_by: "chatgpt-web",
-      })),
-    });
+    const routes = availableChatGptWebModelRoutes(config).map(route => ({
+      id: route.slug,
+      object: "model",
+      created: 0,
+      owned_by: "chatgpt-web",
+    }));
+    const native = resolveNativeCodexConfig(config);
+    const data = native.enabled
+      ? [
+        ...native.models.map(model => ({
+          id: model,
+          object: "model",
+          created: 0,
+          owned_by: "codex-native",
+        })),
+        ...(native.browserFallback ? routes : []),
+      ]
+      : routes;
+    return Response.json({ object: "list", data });
   }
   let upstream: Response;
   try {
@@ -481,6 +503,38 @@ function toolBridgeMaps(parsed: CodexParsedRequest): {
   return { toolNsMap, freeformToolNames, toolSearchToolNames };
 }
 
+const NATIVE_CODEX_FALLBACK_STATUSES = new Set([401, 403, 404, 429]);
+
+/**
+ * Forward a native Responses request with the user's Codex credential. When the native route is
+ * disabled or the model is a browser route, preserve the caller's own authorization.
+ */
+async function forwardNativeCodexWithCredential(
+  request: Request,
+  config: AppConfig,
+  endpoint: NativeCodexEndpoint,
+  raw: unknown,
+  fetchUpstream?: NativeFetch,
+): Promise<Response> {
+  const native = resolveNativeCodexConfig(config);
+  const model = raw && typeof raw === "object" && !Array.isArray(raw)
+    ? (raw as { model?: unknown }).model
+    : undefined;
+  if (!native.enabled || typeof model !== "string" || !isNativeCodexModel(model, native)) {
+    return forwardNativeCodexRequest(request, endpoint, fetchUpstream, raw);
+  }
+  const credential = await loadNativeCodexCredential({ authPath: native.authPath });
+  const headers = nativeCodexHeaders(credential, request.headers);
+  const body = request.method === "GET" ? undefined : JSON.stringify(raw);
+  const authorized = new Request(request.url, {
+    method: request.method,
+    headers,
+    ...(body !== undefined ? { body } : {}),
+    signal: request.signal,
+  });
+  return forwardNativeCodexRequest(authorized, endpoint, fetchUpstream, raw);
+}
+
 export async function responseRequest(
   req: Request,
   config: AppConfig,
@@ -501,6 +555,7 @@ export async function responseRequest(
   const requestedModel = raw && typeof raw === "object" && !Array.isArray(raw)
     ? (raw as { model?: unknown }).model
     : undefined;
+  let effectiveModel = requestedModel;
   try {
     const identity = extractCodexTurnIdentityFromBody(raw);
     if (identity.threadId && identity.turnId) {
@@ -509,7 +564,43 @@ export async function responseRequest(
   } catch (error) {
     return formatErrorResponse(400, "invalid_request_error", error instanceof Error ? error.message : String(error));
   }
-  if (typeof requestedModel === "string" && !isChatGptWebModelSlug(requestedModel)) {
+  const nativeConfig = resolveNativeCodexConfig(config);
+  if (typeof effectiveModel === "string" && isNativeCodexModel(effectiveModel, nativeConfig)) {
+    let fallbackReason: string | undefined;
+    try {
+      const response = await forwardNativeCodexWithCredential(
+        nativeRequest,
+        config,
+        "responses",
+        raw,
+        options.nativeFetch,
+      );
+      if (response.ok
+        || !NATIVE_CODEX_FALLBACK_STATUSES.has(response.status)
+        || !nativeConfig.browserFallback) {
+        console.info(`[chatgpt-web] native_codex model=${effectiveModel} status=${response.status}`);
+        return response;
+      }
+      fallbackReason = `http_${response.status}`;
+    } catch (error) {
+      if (!nativeConfig.browserFallback) {
+        const message = error instanceof NativeCodexUnavailableError
+          ? error.message
+          : error instanceof Error ? error.message : String(error);
+        return formatErrorResponse(503, "server_error", message);
+      }
+      fallbackReason = error instanceof NativeCodexUnavailableError
+        ? error.code
+        : "native_request_failed";
+    }
+    const fallbackModel = nativeCodexBrowserFallback(effectiveModel, nativeConfig);
+    console.warn(
+      `[chatgpt-web] native_codex_fallback model=${effectiveModel} fallback=${fallbackModel} reason=${fallbackReason}`,
+    );
+    raw = { ...(raw as Record<string, unknown>), model: fallbackModel };
+    effectiveModel = fallbackModel;
+  } else if (typeof effectiveModel === "string" && !isChatGptWebModelSlug(effectiveModel)) {
+    // Preserve the existing passthrough for non-DSH Codex clients that bring their own auth.
     try {
       return await forwardNativeCodexRequest(nativeRequest, "responses", undefined, raw);
     } catch (error) {
@@ -706,7 +797,7 @@ export async function compactRequest(
   req: Request,
   config: AppConfig,
   adapterFactory: ChatGptWebAdapterFactory = createChatGptWebAdapter,
-  options: Pick<ResponseRequestOptions, "onTurnIdentity"> = {},
+  options: Pick<ResponseRequestOptions, "onTurnIdentity" | "nativeFetch"> = {},
 ): Promise<Response> {
   const nativeRequest = req.clone();
   let raw: Record<string, unknown>;
@@ -750,8 +841,17 @@ export async function compactRequest(
   }
   if (!isChatGptWebModelSlug(raw.model)) {
     try {
-      return await forwardNativeCodexRequest(nativeRequest, "responses/compact", undefined, raw);
+      return await forwardNativeCodexWithCredential(
+        nativeRequest,
+        config,
+        "responses/compact",
+        raw,
+        options.nativeFetch,
+      );
     } catch (error) {
+      if (error instanceof NativeCodexUnavailableError) {
+        return formatErrorResponse(503, "server_error", error.message);
+      }
       return formatErrorResponse(502, "upstream_error", error instanceof Error ? error.message : String(error));
     }
   }
