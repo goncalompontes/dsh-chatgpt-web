@@ -41,6 +41,7 @@ import { ChatGptTextFeed, ChatGptTraceFeed, chatGptCompactionSourceExecutionKey,
 import { estimateChatGptWebUsage, resolveBiggerContextMultipartParts, type ChatGptWebInputAccounting, type ChatGptWebRoundEvidence } from "./usage";
 import { compiledChatGptWebMaxMessageChars, estimateCompiledChatGptWebInputTokens, estimateCompiledChatGptWebMessageTokens } from "./input-tokens";
 import { runBoundedTextCompaction } from "./text-compaction";
+import { buildLocalCompactionFallback } from "./local-compaction";
 import { ChatGptThreadEnvironmentStore } from "./thread-environment";
 import {
   ChatGptLunaCheckpointStore,
@@ -774,70 +775,84 @@ export function createChatGptWebAdapter(
           checkpointInput.parsed, turnCapabilities, undefined, compileOptionsFor(checkpointInput.parsed),
         );
         if (dshTextCompaction) {
-          const compactionModel = resolveChatGptWebCompactionModel(parsed.modelId);
-          console.info(`[chatgpt-web] dsh_text_compaction_model trace=${traceId} model=${compactionModel.modelId} reasoning=${compactionModel.reasoning}`);
-          // A checkpoint can use the existing chat only when its exact canonical predecessor is
-          // still retained. Missing/pruned history falls back to bounded canonical summarization.
-          const compactionKey = managedConversationRetention
-            ? chatGptConversationKey({ ...parsed, _dshRequestPurpose: undefined }, executionNamespace)
-            : undefined;
-          const resume = compactionKey ? retainedConversationResumeRequest(parsed) : undefined;
-          if (compactionKey && resume) {
-            let retainedSelected = false;
-            const prepare = async () => accountPrepared(compileChatGptWebPrompt(
-              { ...resume, _compactionRequest: true }, turnCapabilities,
-            ), resume);
-            try {
-              const answer = await worker.run({
-                traceId: `${traceId}-compact-retained`, modelId: compactionModel.modelId,
-                reasoning: compactionModel.reasoning, capabilities: turnCapabilities,
-                prepare, prepareResume: prepare, retainConversation: true,
-                requireRetainedConversation: true, conversationKey: compactionKey,
-                conversationPredecessor: conversationPredecessorFingerprint(parsed.context.messages),
-                onPreparedSelected: reused => { retainedSelected = reused; },
-                compaction: true, abortSignal: browserAbort.signal, onTextDelta: () => {},
-              });
-              if (!answer.trim()) throw new Error("ChatGPT returned an empty retained DSH checkpoint");
-              text.push(answer);
-              return answer;
-            } catch (error) {
-              if (!(error instanceof ChatGptWebAdapterError && error.code === "compaction_source_unavailable")) throw error;
-              console.info(`[chatgpt-web] text_compaction_retained_unavailable trace=${traceId}`);
-            } finally {
-              if (retainedSelected) await worker.releaseManagedConversation(compactionKey).catch(error => {
-                console.warn(`[chatgpt-web] retained checkpoint cleanup failed trace=${traceId}: ${String(error)}`);
-              });
+          try {
+            const compactionModel = resolveChatGptWebCompactionModel(parsed.modelId);
+            console.info(`[chatgpt-web] dsh_text_compaction_model trace=${traceId} model=${compactionModel.modelId} reasoning=${compactionModel.reasoning}`);
+            // A checkpoint can use the existing chat only when its exact canonical predecessor is
+            // still retained. Missing/pruned history falls back to bounded canonical summarization.
+            const compactionKey = managedConversationRetention
+              ? chatGptConversationKey({ ...parsed, _dshRequestPurpose: undefined }, executionNamespace)
+              : undefined;
+            const resume = compactionKey ? retainedConversationResumeRequest(parsed) : undefined;
+            if (compactionKey && resume) {
+              let retainedSelected = false;
+              const prepare = async () => accountPrepared(compileChatGptWebPrompt(
+                { ...resume, _compactionRequest: true }, turnCapabilities,
+              ), resume);
+              try {
+                const answer = await worker.run({
+                  traceId: `${traceId}-compact-retained`, modelId: compactionModel.modelId,
+                  reasoning: compactionModel.reasoning, capabilities: turnCapabilities,
+                  prepare, prepareResume: prepare, retainConversation: true,
+                  requireRetainedConversation: true, conversationKey: compactionKey,
+                  conversationPredecessor: conversationPredecessorFingerprint(parsed.context.messages),
+                  onPreparedSelected: reused => { retainedSelected = reused; },
+                  compaction: true, abortSignal: browserAbort.signal, onTextDelta: () => {},
+                });
+                if (!answer.trim()) throw new Error("ChatGPT returned an empty retained DSH checkpoint");
+                text.push(answer);
+                return answer;
+              } catch (error) {
+                if (!(error instanceof ChatGptWebAdapterError && error.code === "compaction_source_unavailable")) throw error;
+                console.info(`[chatgpt-web] text_compaction_retained_unavailable trace=${traceId}`);
+              } finally {
+                if (retainedSelected) await worker.releaseManagedConversation(compactionKey).catch(error => {
+                  console.warn(`[chatgpt-web] retained checkpoint cleanup failed trace=${traceId}: ${String(error)}`);
+                });
+              }
             }
+            const compactionMode = resolveChatGptWebModelMode(compactionModel.modelId, compactionModel.reasoning, turnCapabilities);
+            const contextWindow = resolveChatGptWebContextLimits(compactionModel.modelId as ChatGptWebBackendModel, compactionMode.effort, turnCapabilities).contextWindow;
+            const fits = (prompt: typeof compiled): boolean => {
+              const inputTokens = estimateCompiledChatGptWebInputTokens(prompt, compactionModel.modelId);
+              // Leave room to generate the checkpoint; retain the real transport/composer gates.
+              if (inputTokens + Math.min(8_192, Math.floor(contextWindow / 4)) >= contextWindow) return false;
+              try {
+                assertChatGptWebInputWithinLimits(inputTokens,
+                  estimateCompiledChatGptWebMessageTokens(prompt, compactionModel.modelId), compactionModel.modelId,
+                  compactionMode.effort, turnCapabilities, compiledChatGptWebMaxMessageChars(prompt),
+                  provider.chatgptWeb?.tuning?.composerCharLimit);
+                return true;
+              } catch (error) {
+                if (error instanceof ChatGptWebAdapterError && error.code === "context_length_exceeded") return false;
+                throw error;
+              }
+            };
+            const answer = await runBoundedTextCompaction(compiled, fits, (prompt, index) => worker.run({
+              traceId: `${traceId}-compact-${index}`,
+              modelId: compactionModel.modelId,
+              reasoning: compactionModel.reasoning,
+              capabilities: turnCapabilities,
+              prepare: async () => accountPrepared(prompt, checkpointInput.parsed),
+              compaction: true,
+              abortSignal: browserAbort.signal,
+              onTextDelta: () => {},
+            }), browserAbort.signal);
+            text.push(answer);
+            return answer;
+          } catch (error) {
+            if (browserAbort.signal.aborted) throw error;
+            const reason = error instanceof ChatGptWebAdapterError
+              ? error.code
+              : "browser_compaction_failed";
+            const fallback = buildLocalCompactionFallback(parsed, reason);
+            console.warn(
+              `[chatgpt-web] local_compaction_fallback trace=${traceId}`
+              + ` reason=${reason} chars=${fallback.length}`,
+            );
+            text.push(fallback);
+            return fallback;
           }
-          const compactionMode = resolveChatGptWebModelMode(compactionModel.modelId, compactionModel.reasoning, turnCapabilities);
-          const contextWindow = resolveChatGptWebContextLimits(compactionModel.modelId as ChatGptWebBackendModel, compactionMode.effort, turnCapabilities).contextWindow;
-          const fits = (prompt: typeof compiled): boolean => {
-            const inputTokens = estimateCompiledChatGptWebInputTokens(prompt, compactionModel.modelId);
-            // Leave room to generate the checkpoint; retain the real transport/composer gates.
-            if (inputTokens + Math.min(8_192, Math.floor(contextWindow / 4)) >= contextWindow) return false;
-            try {
-              assertChatGptWebInputWithinLimits(inputTokens,
-                estimateCompiledChatGptWebMessageTokens(prompt, compactionModel.modelId), compactionModel.modelId,
-                compactionMode.effort, turnCapabilities, compiledChatGptWebMaxMessageChars(prompt),
-                provider.chatgptWeb?.tuning?.composerCharLimit);
-              return true;
-            } catch (error) {
-              if (error instanceof ChatGptWebAdapterError && error.code === "context_length_exceeded") return false;
-              throw error;
-            }
-          };
-          const answer = await runBoundedTextCompaction(compiled, fits, (prompt, index) => worker.run({
-            traceId: `${traceId}-compact-${index}`,
-            modelId: compactionModel.modelId,
-            reasoning: compactionModel.reasoning,
-            capabilities: turnCapabilities,
-            prepare: async () => accountPrepared(prompt, checkpointInput.parsed),
-            compaction: true,
-            abortSignal: browserAbort.signal,
-            onTextDelta: () => {},
-          }), browserAbort.signal);
-          text.push(answer);
-          return answer;
         }
         return worker.run({
           traceId,
@@ -1280,15 +1295,32 @@ export function createChatGptWebAdapter(
               // surfacing this as retryable lets the caller make the bounded second attempt.
               const retryableHandoff = compactionFailureNeedsFreshSurface(handoffCode)
                 || (handoffError instanceof ChatGptWebAdapterError && handoffError.retryable);
+              if (incoming.abortSignal?.aborted) throw handoffError;
+              if (retryableHandoff) {
+                // A browser surface failure during compaction must not fail the caller's turn.
+                // Compaction has no side-effecting tool calls, so preserve the recent transcript
+                // in a deterministic local checkpoint and let the next model turn continue.
+                const fallback = buildLocalCompactionFallback(parsed, handoffCode);
+                console.warn(
+                  `[chatgpt-web] local_compaction_fallback trace=structured`
+                  + ` reason=${handoffCode} chars=${fallback.length}`,
+                );
+                emit({ type: "text_delta", text: fallback, phase: "final_answer" });
+                emitBrowserCompletion(
+                  { type: "final", answer: fallback },
+                  estimateChatGptWebUsage(parsed, { answer: fallback, reasoning: [] }, turnCapabilities),
+                  emit,
+                );
+                chatGptWebTurnRetryPolicy.clear(retryKey);
+                return;
+              }
               emit({
                 type: "error",
-                message: retryableHandoff
-                  ? "ChatGPT did not complete the context handoff on this surface. Retry the compaction."
-                  : "ChatGPT did not complete the context handoff. Retry the task.",
-                status: retryableHandoff ? 503 : 409,
-                errorType: retryableHandoff ? "server_error" : "invalid_request_error",
-                code: retryableHandoff ? "compaction_handoff_retryable" : "compaction_handoff_failed",
-                retryable: retryableHandoff,
+                message: "ChatGPT did not complete the context handoff. Retry the task.",
+                status: 409,
+                errorType: "invalid_request_error",
+                code: "compaction_handoff_failed",
+                retryable: false,
               });
               return;
             }
