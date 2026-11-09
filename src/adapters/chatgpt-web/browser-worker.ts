@@ -2482,7 +2482,7 @@ export class ChatGptBrowserWorker {
     chatGptSuspensionClock.start();
     const startedAt = performance.now();
     const suspendedAtStart = suspensionClock.suspendedMs();
-    console.info(`[chatgpt-web] browser turn ${traceId} stage=${stage} started`);
+    console.info(`[chatgpt-web] ts=${new Date().toISOString()} browser turn ${traceId} stage=${stage} started`);
     const controller = new AbortController();
     let timer: ReturnType<typeof setTimeout> | undefined;
     let stageTimedOut = false;
@@ -2506,7 +2506,7 @@ export class ChatGptBrowserWorker {
       });
       actionPromise = action(controller.signal);
       const value = await Promise.race([actionPromise, timeout]);
-      console.info(`[chatgpt-web] browser turn ${traceId} stage=${stage} completed durationMs=${Math.round(performance.now() - startedAt)}`);
+      console.info(`[chatgpt-web] ts=${new Date().toISOString()} browser turn ${traceId} stage=${stage} completed durationMs=${Math.round(performance.now() - startedAt)}`);
       return value;
     } catch (error) {
       let surfacedError = error;
@@ -2519,7 +2519,7 @@ export class ChatGptBrowserWorker {
           }
         }
       }
-      console.error(`[chatgpt-web] browser turn ${traceId} stage=${stage} failed durationMs=${Math.round(performance.now() - startedAt)}: ${surfacedError instanceof Error ? surfacedError.message : String(surfacedError)}`);
+      console.error(`[chatgpt-web] ts=${new Date().toISOString()} browser turn ${traceId} stage=${stage} failed durationMs=${Math.round(performance.now() - startedAt)}: ${surfacedError instanceof Error ? surfacedError.message : String(surfacedError)}`);
       throw surfacedError;
     } finally {
       if (timer) clearTimeout(timer);
@@ -5770,7 +5770,7 @@ export class ChatGptBrowserWorker {
           );
         }
         console.warn(
-          `[chatgpt-web] browser turn ${turn.traceId} tolerated internal observation fault`
+          `[chatgpt-web] ts=${new Date().toISOString()} browser turn ${turn.traceId} tolerated internal observation fault`
           + ` ${internalObservationFaults}/${MAX_CHATGPT_INTERNAL_OBSERVATION_FAULTS}: ${error.message}`,
         );
         await diagnostics.capture(page, "internal-observation-fault");
@@ -5795,7 +5795,7 @@ export class ChatGptBrowserWorker {
       return finalText;
     } catch (error) {
       console.error(
-        `[chatgpt-web] browser turn ${turn.traceId} failed:`
+        `[chatgpt-web] ts=${new Date().toISOString()} browser turn ${turn.traceId} failed:`
         + ` ${redactChatGptUiDiagnostic(error instanceof Error ? error.message : String(error))}`,
       );
       if (diagnosticPage && !diagnosticPage.isClosed()) {

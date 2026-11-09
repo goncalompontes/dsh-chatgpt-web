@@ -30,6 +30,11 @@ import { chatGptReadOnlyContextWarning, compileChatGptWebPrompt } from "./prompt
 import { createChatGptStructuredOutputValidator } from "./output-validation";
 import { ChatGptToolStreamParser, type ParsedToolCall } from "./tool-stream-parser";
 import { chatGptWebTurnRetryPolicy } from "./retry-policy";
+import {
+  chatGptClassifiedError,
+  chatGptTurnEvent,
+  classifyChatGptTurnFailure,
+} from "./turn-observability";
 import { TurnBroker, type BrokerToolRequest, type BrokerToolResult, type TurnBrokerOwner } from "./turn-broker";
 import { ChatGptTextFeed, ChatGptTraceFeed, chatGptCompactionSourceExecutionKey, chatGptThreadOwnershipKey, chatGptTurnExecutionKey, chatGptTurnRetryKey, chatGptTurnRoundKey, chatGptTurnSessions, outstandingChatGptToolCallId, type ChatGptBrowserOutcome, type ChatGptTraceEvent, type ChatGptTurnRuntime, type ChatGptTurnSession } from "./turn-execution";
 import { estimateChatGptWebUsage, resolveBiggerContextMultipartParts, type ChatGptWebInputAccounting, type ChatGptWebRoundEvidence } from "./usage";
@@ -343,25 +348,21 @@ function submittedTurnFailure(session: ChatGptTurnSession, error: unknown): Erro
         errorType: "server_error",
         code: "chatgpt_surface_stale",
         retryable: true,
+        phase: "observing",
+        retryDisposition: "retry_fresh_surface",
         cause: normalized,
       },
     );
   }
-  const phase = session.runtime.submission?.phase;
-  if (!phase || phase === "prepared") return normalized;
-  const ambiguous = phase === "send_activated";
-  return new ChatGptWebAdapterError(
-    ambiguous
-      ? "ChatGPT did not confirm that the prompt was sent. Check the ChatGPT tab before continuing."
-      : "ChatGPT stopped responding after the task started. Check the ChatGPT tab before continuing.",
-    {
-      status: 502,
-      errorType: "server_error",
-      code: ambiguous ? "chatgpt_submission_ambiguous" : "chatgpt_submitted_turn_failed",
-      retryable: false,
-      cause: normalized,
-    },
-  );
+  const classification = classifyChatGptTurnFailure({
+    phase: session.runtime.submission?.phase,
+    message: normalized.message,
+    name: normalized.name,
+  });
+  // An unrecognised pre-Send error keeps its original shape: it may be a deterministic
+  // configuration or identity failure that must not be retried as a browser-surface fault.
+  if (!classification.recognized) return normalized;
+  return chatGptClassifiedError(classification, normalized);
 }
 
 export function currentToolResults(parsed: CodexParsedRequest, session: ChatGptTurnSession): CodexToolResultMessage[] {
@@ -962,6 +963,16 @@ export function createChatGptWebAdapter(
   return {
     name: "chatgpt-web",
     async runTurn(parsed, incoming, emit) {
+      const requestStartedAt = performance.now();
+      const requestPurpose = parsed._compactionRequest ? "compaction" : "response";
+      let requestOutcome: "completed" | "tool_batch" | "error" | "cancelled" = "completed";
+      let requestCode: string | undefined;
+      let requestTraceId = "unknown";
+      try {
+        requestTraceId = chatGptWebTraceId(provider, parsed);
+      } catch {
+        // Identity validation below reports the actionable error; the event still has a purpose.
+      }
       const runChatGptWebTurn = async (): Promise<void> => {
         const manualRequest = isChatGptWebZeroRiskBackendModel(parsed.modelId);
         if (manualRequest !== manualInteraction) {
@@ -1277,7 +1288,17 @@ export function createChatGptWebAdapter(
         const identityHash = createHash("sha256").update(JSON.stringify([nativeIdentity.threadId, nativeIdentity.turnId])).digest("hex").slice(0, 12);
         const roundKey = chatGptTurnRoundKey(parsed);
         const roundHash = createHash("sha256").update(roundKey).digest("hex").slice(0, 12);
+        const roundStartedAt = performance.now();
         console.info(`[chatgpt-web] continuation_entry trace=${traceId} identity=${identityHash} round=${roundHash} tool_results=${parsed.context.messages.filter(message => message.role === "toolResult").length}`);
+        chatGptTurnEvent({
+          event: "round_start",
+          traceId,
+          roundKey: roundHash,
+          purpose: requestPurpose,
+          modelId: parsed.modelId,
+          phase: "pre_send",
+          toolResults: parsed.context.messages.filter(message => message.role === "toolResult").length,
+        });
         const session = await chatGptTurnSessions.getOrCreateAfterOwnerRetirement(
           executionKey,
           ownerKey,
@@ -1640,6 +1661,7 @@ export function createChatGptWebAdapter(
                   roundUsage({ reasoning: roundReasoning, toolRequests: next.requests }),
                   buffer,
                 ));
+                requestOutcome = "tool_batch";
                 session.completeRound(roundKey);
                 return;
               }
@@ -1649,6 +1671,16 @@ export function createChatGptWebAdapter(
           });
         } catch (error) {
           if (incoming.abortSignal?.aborted && error instanceof DOMException && error.name === "AbortError") {
+            requestOutcome = "cancelled";
+            chatGptTurnEvent({
+              event: "round_cancelled",
+              traceId,
+              roundKey: roundHash,
+              purpose: requestPurpose,
+              modelId: parsed.modelId,
+              outcome: "cancelled",
+              durationMs: Math.round(performance.now() - roundStartedAt),
+            });
             if (session.runtime.manualControl) {
               // Zero Risk is user-driven and has no DOM observer that can distinguish continued
               // work from a stopped native turn. A closed Responses stream is therefore terminal:
@@ -1667,6 +1699,27 @@ export function createChatGptWebAdapter(
           if (!(turnError instanceof ChatGptWebAdapterError && turnError.retryable)) {
             chatGptWebTurnRetryPolicy.clear(retryKey);
           }
+          requestOutcome = "error";
+          requestCode = handledError instanceof ChatGptWebAdapterError
+            ? handledError.code
+            : "chatgpt_unclassified_error";
+          chatGptTurnEvent({
+            event: "round_error",
+            traceId,
+            roundKey: roundHash,
+            purpose: requestPurpose,
+            modelId: parsed.modelId,
+            outcome: "error",
+            code: requestCode,
+            phase: handledError instanceof ChatGptWebAdapterError ? handledError.phase : "unknown",
+            status: handledError instanceof ChatGptWebAdapterError ? handledError.status : undefined,
+            errorType: handledError instanceof ChatGptWebAdapterError ? handledError.errorType : undefined,
+            retryable: handledError instanceof ChatGptWebAdapterError ? handledError.retryable : false,
+            retryDisposition: handledError instanceof ChatGptWebAdapterError
+              ? handledError.retryDisposition
+              : "none",
+            durationMs: Math.round(performance.now() - roundStartedAt),
+          });
           if (handledError instanceof ChatGptWebAdapterError && !handledError.retryable) {
             // A deterministic request failure remains replayable so a native reconnect cannot burn
             // another browser attempt. Every other failure retires the browser session: client
@@ -1705,8 +1758,25 @@ export function createChatGptWebAdapter(
       try {
         emit({ type: "heartbeat" });
         await runChatGptWebTurn();
+      } catch (error) {
+        if (error instanceof DOMException && error.name === "AbortError") {
+          requestOutcome = "cancelled";
+        } else {
+          requestOutcome = "error";
+          requestCode ??= "chatgpt_request_failed";
+        }
+        throw error;
       } finally {
         clearInterval(heartbeat);
+        chatGptTurnEvent({
+          event: "request_end",
+          traceId: requestTraceId,
+          purpose: requestPurpose,
+          modelId: parsed.modelId,
+          outcome: requestOutcome,
+          code: requestCode,
+          durationMs: Math.round(performance.now() - requestStartedAt),
+        });
       }
     },
   };
