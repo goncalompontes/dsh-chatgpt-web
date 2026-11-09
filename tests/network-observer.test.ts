@@ -55,6 +55,11 @@ browserTest("the fetch tee captures the conversation stream without consuming th
     expect(stream?.buffer).toBe(BODY);
     expect(stream?.done).toBe(true);
     expect(stream?.url).toContain("/backend-api/f/conversation");
+
+    const suffix = await readChatGptNetworkStream(page, 0, 5);
+    expect(suffix?.offset).toBe(5);
+    expect(suffix?.totalLength).toBe(BODY.length);
+    expect(suffix?.buffer).toBe(BODY.slice(5));
   } finally {
     await browser.close();
   }

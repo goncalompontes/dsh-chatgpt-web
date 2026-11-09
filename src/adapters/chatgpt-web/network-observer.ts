@@ -18,8 +18,12 @@ export interface ChatGptNetworkPageStream {
   startedAt: number;
   done: boolean;
   error?: string;
-  /** Raw SSE bytes received so far. Never exposed to the page or logs. */
+  /** Raw SSE bytes received so far, or only the new suffix when `offset` was supplied. */
   buffer: string;
+  /** Start offset of the returned buffer in the full stream. */
+  offset: number;
+  /** Total bytes captured for this stream. */
+  totalLength: number;
   truncated: boolean;
 }
 
@@ -75,6 +79,8 @@ export function installChatGptNetworkObserverInPage(): void {
         startedAt: Date.now(),
         done: false,
         buffer: "",
+        offset: 0,
+        totalLength: 0,
         truncated: false,
       };
       state.streams.push(stream);
@@ -126,8 +132,9 @@ export async function installChatGptNetworkObservation(page: Page): Promise<void
 export async function readChatGptNetworkStream(
   page: Page,
   since: number,
+  offset = 0,
 ): Promise<ChatGptNetworkPageStream | undefined> {
-  return page.evaluate(({ since, maxStreams }) => {
+  return page.evaluate(({ since, maxStreams, offset }) => {
     const scope = globalThis as unknown as {
       __DSH_CHATGPT_NETWORK__?: ChatGptNetworkPageState;
     };
@@ -138,6 +145,7 @@ export async function readChatGptNetworkStream(
       .slice(-maxStreams);
     const stream = streams[streams.length - 1];
     if (!stream) return undefined;
+    const start = Math.max(0, Math.min(offset, stream.buffer.length));
     return {
       id: stream.id,
       url: stream.url,
@@ -145,8 +153,10 @@ export async function readChatGptNetworkStream(
       startedAt: stream.startedAt,
       done: stream.done,
       ...(stream.error ? { error: stream.error } : {}),
-      buffer: stream.buffer,
+      buffer: stream.buffer.slice(start),
+      offset: start,
+      totalLength: stream.buffer.length,
       truncated: stream.truncated,
     };
-  }, { since, maxStreams: MAX_STREAMS });
+  }, { since, maxStreams: MAX_STREAMS, offset });
 }

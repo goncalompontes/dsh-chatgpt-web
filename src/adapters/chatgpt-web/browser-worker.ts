@@ -5411,12 +5411,16 @@ export class ChatGptBrowserWorker {
         if (!force && Date.now() - networkLastReadAt < 1_000) return networkState;
         networkLastReadAt = Date.now();
         try {
-          const stream = await readChatGptNetworkStream(page, networkSince);
+          let stream = await readChatGptNetworkStream(page, networkSince, networkBufferChars);
           if (!stream) return networkState;
-          if (stream.buffer.length < networkBufferChars) networkBufferChars = 0;
-          const delta = stream.buffer.slice(networkBufferChars);
-          networkBufferChars = stream.buffer.length;
-          if (delta) networkParser.push(delta);
+          if (stream.totalLength < networkBufferChars) {
+            // A new stream replaced the old one (continuation/rebind); replay from its start.
+            networkBufferChars = 0;
+            stream = await readChatGptNetworkStream(page, networkSince, 0);
+            if (!stream) return networkState;
+          }
+          if (stream.buffer) networkParser.push(stream.buffer);
+          networkBufferChars = stream.offset;
           networkState = networkParser.snapshot();
           // A reader abort is not a provider error: the page can abort a fetch on navigation or
           // teardown. Only an explicit SSE error event is authoritative; the DOM remains the
