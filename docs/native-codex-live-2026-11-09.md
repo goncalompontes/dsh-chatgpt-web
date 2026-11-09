@@ -96,10 +96,16 @@ all 10 had non-zero text. The DOM projection and the stream text differed only b
 available as the corroborating/recovery source. The soak sends no tool calls; it measures browser
 transport completion, not tool execution.
 
+A post-optimization confirmation on head `31df038` (network stream now returns only new bytes per
+poll) passed **6/6** turns at concurrency 2: p50 11,251 ms, p95 14,873 ms, zero retries; network
+observation captured non-zero text on all 6 turns.
+
 Evidence files:
 
 - `docs/browser-reliability-soak-2026-11-09.json`
 - `docs/browser-reliability-soak-2026-11-09.md`
+- `docs/browser-reliability-soak-2026-11-09-final.json`
+- `docs/browser-reliability-soak-2026-11-09-final.md`
 
 ## Limits
 

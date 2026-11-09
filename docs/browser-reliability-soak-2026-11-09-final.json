@@ -1,0 +1,78 @@
+{
+  "startedAt": "2026-11-09T13:13:41.731Z",
+  "url": "http://127.0.0.1:17852/v1",
+  "model": "chatgpt-web/gpt-6-light",
+  "turns": 6,
+  "concurrency": 2,
+  "passed": 6,
+  "failed": 0,
+  "passRate": 1,
+  "results": [
+    {
+      "index": 0,
+      "sessionId": "soak-20261109131309-0",
+      "status": "passed",
+      "httpStatus": 200,
+      "durationMs": 7617,
+      "outputChars": 306,
+      "markerSeen": true,
+      "completed": true,
+      "retried": 0
+    },
+    {
+      "index": 1,
+      "sessionId": "soak-20261109131309-1",
+      "status": "passed",
+      "httpStatus": 200,
+      "durationMs": 14873,
+      "outputChars": 306,
+      "markerSeen": true,
+      "completed": true,
+      "retried": 0
+    },
+    {
+      "index": 2,
+      "sessionId": "soak-20261109131309-2",
+      "status": "passed",
+      "httpStatus": 200,
+      "durationMs": 13200,
+      "outputChars": 306,
+      "markerSeen": true,
+      "completed": true,
+      "retried": 0
+    },
+    {
+      "index": 3,
+      "sessionId": "soak-20261109131309-3",
+      "status": "passed",
+      "httpStatus": 200,
+      "durationMs": 11251,
+      "outputChars": 306,
+      "markerSeen": true,
+      "completed": true,
+      "retried": 0
+    },
+    {
+      "index": 4,
+      "sessionId": "soak-20261109131309-4",
+      "status": "passed",
+      "httpStatus": 200,
+      "durationMs": 6223,
+      "outputChars": 306,
+      "markerSeen": true,
+      "completed": true,
+      "retried": 0
+    },
+    {
+      "index": 5,
+      "sessionId": "soak-20261109131309-5",
+      "status": "passed",
+      "httpStatus": 200,
+      "durationMs": 6299,
+      "outputChars": 306,
+      "markerSeen": true,
+      "completed": true,
+      "retried": 0
+    }
+  ]
+}
