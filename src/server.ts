@@ -525,14 +525,26 @@ async function forwardNativeCodexWithCredential(
   }
   const credential = await loadNativeCodexCredential({ authPath: native.authPath });
   const headers = nativeCodexHeaders(credential, request.headers);
-  const body = request.method === "GET" ? undefined : JSON.stringify(raw);
+  const nativeBody = raw && typeof raw === "object" && !Array.isArray(raw)
+    ? { ...(raw as Record<string, unknown>), store: false }
+    : raw;
+  if (nativeBody && typeof nativeBody === "object" && !Array.isArray(nativeBody)) {
+    // The Codex subscription backend rejects platform-API-only tuning fields.
+    for (const key of [
+      "max_output_tokens", "temperature", "top_p", "background", "conversation",
+      "metadata", "moderation", "prompt",
+    ]) {
+      delete (nativeBody as Record<string, unknown>)[key];
+    }
+  }
+  const body = request.method === "GET" ? undefined : JSON.stringify(nativeBody);
   const authorized = new Request(request.url, {
     method: request.method,
     headers,
     ...(body !== undefined ? { body } : {}),
     signal: request.signal,
   });
-  return forwardNativeCodexRequest(authorized, endpoint, fetchUpstream, raw);
+  return forwardNativeCodexRequest(authorized, endpoint, fetchUpstream, nativeBody);
 }
 
 export async function responseRequest(

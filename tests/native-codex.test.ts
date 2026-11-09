@@ -209,6 +209,8 @@ test("native Responses calls use the Codex credential instead of the placeholder
       body: JSON.stringify({
         model: "gpt-6.1-sol",
         stream: true,
+        max_output_tokens: 1234,
+        temperature: 0.7,
         input: [{ role: "user", content: "hi" }],
       }),
     }), config, () => { throw new Error("browser adapter must not run"); }, { nativeFetch, rememberState: false });
@@ -218,6 +220,10 @@ test("native Responses calls use the Codex credential instead of the placeholder
     expect(captured?.headers.get("chatgpt-account-id")).toBe("acct-1");
     expect(captured?.headers.get("originator")).toBe("codex_cli_rs");
     expect(captured?.headers.get("x-dsh-session-id")).toBeNull();
+    const forwarded = JSON.parse(await captured!.text()) as Record<string, unknown>;
+    expect(forwarded.store).toBe(false);
+    expect(forwarded.max_output_tokens).toBeUndefined();
+    expect(forwarded.temperature).toBeUndefined();
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
