@@ -1,0 +1,122 @@
+{
+  "startedAt": "2026-11-09T13:08:43.080Z",
+  "url": "http://127.0.0.1:17851/v1",
+  "model": "chatgpt-web/gpt-6-light",
+  "turns": 10,
+  "concurrency": 3,
+  "passed": 10,
+  "failed": 0,
+  "passRate": 1,
+  "results": [
+    {
+      "index": 0,
+      "sessionId": "soak-20261109130750-0",
+      "status": "passed",
+      "httpStatus": 200,
+      "durationMs": 7938,
+      "outputChars": 306,
+      "markerSeen": true,
+      "completed": true,
+      "retried": 0
+    },
+    {
+      "index": 1,
+      "sessionId": "soak-20261109130750-1",
+      "status": "passed",
+      "httpStatus": 200,
+      "durationMs": 15372,
+      "outputChars": 306,
+      "markerSeen": true,
+      "completed": true,
+      "retried": 0
+    },
+    {
+      "index": 2,
+      "sessionId": "soak-20261109130750-2",
+      "status": "passed",
+      "httpStatus": 200,
+      "durationMs": 24901,
+      "outputChars": 306,
+      "markerSeen": true,
+      "completed": true,
+      "retried": 0
+    },
+    {
+      "index": 3,
+      "sessionId": "soak-20261109130750-3",
+      "status": "passed",
+      "httpStatus": 200,
+      "durationMs": 22929,
+      "outputChars": 306,
+      "markerSeen": true,
+      "completed": true,
+      "retried": 0
+    },
+    {
+      "index": 4,
+      "sessionId": "soak-20261109130750-4",
+      "status": "passed",
+      "httpStatus": 200,
+      "durationMs": 21920,
+      "outputChars": 306,
+      "markerSeen": true,
+      "completed": true,
+      "retried": 0
+    },
+    {
+      "index": 5,
+      "sessionId": "soak-20261109130750-5",
+      "status": "passed",
+      "httpStatus": 200,
+      "durationMs": 12294,
+      "outputChars": 306,
+      "markerSeen": true,
+      "completed": true,
+      "retried": 0
+    },
+    {
+      "index": 6,
+      "sessionId": "soak-20261109130750-6",
+      "status": "passed",
+      "httpStatus": 200,
+      "durationMs": 13737,
+      "outputChars": 306,
+      "markerSeen": true,
+      "completed": true,
+      "retried": 0
+    },
+    {
+      "index": 7,
+      "sessionId": "soak-20261109130750-7",
+      "status": "passed",
+      "httpStatus": 200,
+      "durationMs": 7865,
+      "outputChars": 306,
+      "markerSeen": true,
+      "completed": true,
+      "retried": 0
+    },
+    {
+      "index": 8,
+      "sessionId": "soak-20261109130750-8",
+      "status": "passed",
+      "httpStatus": 200,
+      "durationMs": 15763,
+      "outputChars": 306,
+      "markerSeen": true,
+      "completed": true,
+      "retried": 0
+    },
+    {
+      "index": 9,
+      "sessionId": "soak-20261109130750-9",
+      "status": "passed",
+      "httpStatus": 200,
+      "durationMs": 7864,
+      "outputChars": 306,
+      "markerSeen": true,
+      "completed": true,
+      "retried": 0
+    }
+  ]
+}
