@@ -84,6 +84,12 @@ import {
 } from "../../chatgpt-web-models";
 import { LauncherBrowserHelperClient } from "./launcher-helper-client";
 import { MAX_CHATGPT_BROWSER_TABS } from "./concurrency";
+import { ChatGptNetworkStreamParser, type ChatGptNetworkStreamState } from "./network-stream";
+import {
+  installChatGptNetworkObservation,
+  installChatGptNetworkObserverInPage,
+  readChatGptNetworkStream,
+} from "./network-observer";
 import {
   ChatGptSurfaceStaleError,
   ChatGptWebAdapterError,
@@ -105,6 +111,14 @@ import type {
 } from "./turn-progress";
 
 export { MAX_CHATGPT_BROWSER_TABS } from "./concurrency";
+
+/**
+ * Capture the model's conversation stream in parallel with the DOM. Enabled by default because
+ * the tee is non-destructive and gives exact text, completion and errors. Set
+ * `DSH_CHATGPT_NETWORK_OBSERVATION=0` to disable it.
+ */
+export const CHATGPT_NETWORK_OBSERVATION_ENABLED =
+  process.env.DSH_CHATGPT_NETWORK_OBSERVATION !== "0";
 
 const workers = new Map<string, ChatGptBrowserWorker>();
 
@@ -278,6 +292,32 @@ function chatGptModelControlUnavailableAdapterError(diagnostic: string): ChatGpt
       cause: new Error(diagnostic),
     },
   );
+}
+
+function chatGptNetworkStreamError(state: ChatGptNetworkStreamState): ChatGptWebAdapterError {
+  const message = state.error?.message ?? "ChatGPT conversation stream failed";
+  if (/too long|context length|maximum context|token limit/i.test(message)) {
+    return new ChatGptWebAdapterError(
+      "ChatGPT rejected the submitted messages as too long. Compact the conversation before retrying.",
+      {
+        status: 400,
+        errorType: "invalid_request_error",
+        code: "context_length_exceeded",
+        retryable: false,
+        phase: "observing",
+        retryDisposition: "none",
+        cause: new Error(message),
+      },
+    );
+  }
+  return new ChatGptWebAdapterError(message, {
+    status: 502,
+    errorType: "server_error",
+    code: "chatgpt_network_stream_error",
+    retryable: false,
+    phase: "observing",
+    retryDisposition: "none",
+  });
 }
 
 export type ChatGptPersonalizationPreflight = "already-personalized" | "enabled";
@@ -2516,6 +2556,7 @@ export class ChatGptBrowserWorker {
       ...(!this.config.headed ? { userAgent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36" } : {}),
     });
     await this.context.addInitScript("globalThis.__name = (t, v) => t;");
+    await this.context.addInitScript(installChatGptNetworkObserverInPage);
     this.page = await this.context.newPage();
     return this.page;
   }
@@ -2547,6 +2588,7 @@ export class ChatGptBrowserWorker {
         ...(!this.config.headed ? { userAgent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36" } : {}),
       });
       await context.addInitScript("globalThis.__name = (t, v) => t;");
+      await context.addInitScript(installChatGptNetworkObserverInPage);
       this.browser = browser;
       this.context = context;
       return { browser, context };
@@ -4951,6 +4993,14 @@ export class ChatGptBrowserWorker {
       });
       if ((!maintenancePage || managedConversationKey) && !launcherSurfaceId) managedPage = page;
       diagnosticPage = page;
+      if (CHATGPT_NETWORK_OBSERVATION_ENABLED) {
+        await installChatGptNetworkObservation(page).catch(error => {
+          console.warn(
+            `[chatgpt-web] network observation unavailable trace=${turn.traceId}:`
+            + ` ${error instanceof Error ? error.message : String(error)}`,
+          );
+        });
+      }
       const rebindLauncherPage = async (
         attempt: number,
         cause: Error,
@@ -5343,6 +5393,55 @@ export class ChatGptBrowserWorker {
       let loggedCompletionWait = false;
       let capturedResponse = false;
       const sentAt = Date.now();
+      const networkParser = CHATGPT_NETWORK_OBSERVATION_ENABLED
+        ? new ChatGptNetworkStreamParser()
+        : undefined;
+      const networkSince = sentAt - 1_000;
+      let networkBufferChars = 0;
+      let networkState: ChatGptNetworkStreamState | undefined;
+      let networkLastReadAt = 0;
+      let networkReadFaults = 0;
+      let networkCompletionLogged = false;
+      const readNetwork = async (force: boolean): Promise<ChatGptNetworkStreamState | undefined> => {
+        if (!networkParser) return undefined;
+        if (!force && Date.now() - networkLastReadAt < 1_000) return networkState;
+        networkLastReadAt = Date.now();
+        try {
+          const stream = await readChatGptNetworkStream(page, networkSince);
+          if (!stream) return networkState;
+          if (stream.buffer.length < networkBufferChars) networkBufferChars = 0;
+          const delta = stream.buffer.slice(networkBufferChars);
+          networkBufferChars = stream.buffer.length;
+          if (delta) networkParser.push(delta);
+          networkState = networkParser.snapshot();
+          if (stream.error) {
+            networkState = {
+              ...networkState,
+              status: "error",
+              error: { message: stream.error },
+            };
+          }
+          if (!networkCompletionLogged && networkState.status === "complete") {
+            networkCompletionLogged = true;
+            console.info(
+              `[chatgpt-web] network_stream complete trace=${turn.traceId}`
+              + ` chars=${networkState.text.length}`
+              + ` conversation=${networkState.conversationId ? "present" : "none"}`
+              + ` message=${networkState.messageId ? "present" : "none"}`,
+            );
+          }
+          return networkState;
+        } catch (error) {
+          networkReadFaults += 1;
+          if (networkReadFaults <= 3) {
+            console.warn(
+              `[chatgpt-web] network_stream read fault ${networkReadFaults}/3 trace=${turn.traceId}:`
+              + ` ${error instanceof Error ? error.message : String(error)}`,
+            );
+          }
+          return networkState;
+        }
+      };
       const visibleTrace = new ChatGptVisibleTraceTracker();
       const markdownBuffer = new ChatGptMarkdownBuffer();
       const checkpointStream = turn.captureLunaCheckpoint
@@ -5403,8 +5502,12 @@ export class ChatGptBrowserWorker {
           continue;
         }
 
+        const observedNetwork = await readNetwork(false);
+        if (observedNetwork?.status === "error") throw chatGptNetworkStreamError(observedNetwork);
         let snapshot = await this.responseDomSnapshot(responseTurn.locator, responseDomCache);
         if (!snapshot.responsePresent) {
+          const missingNetwork = await readNetwork(true);
+          if (missingNetwork?.status === "error") throw chatGptNetworkStreamError(missingNetwork);
           try {
             const rebound = await withChatGptBrowserObservationTimeout(
               this.reconcileAssistantTurnBinding(
@@ -5467,7 +5570,9 @@ export class ChatGptBrowserWorker {
           externalProgressSnapshot,
           Date.now(),
         );
+        const networkStreaming = networkState?.status === "streaming" && networkState.text.length > 0;
         const domHealthSuspended = externalProgressLive
+          || networkStreaming
           || Date.now() < toolConfirmationGraceUntil;
         const externalToolCallsInFlight = chatGptExternalToolCallsAreInFlight(externalProgressSnapshot);
         const stop = page.locator(CHATGPT_STOP_BUTTON_SELECTOR).last();
@@ -5517,6 +5622,10 @@ export class ChatGptBrowserWorker {
             externalProgressLive: domHealthSuspended,
           });
           if (domError) throw new Error(domError);
+          const networkTerminal = networkState?.status === "complete"
+            && !running
+            && !externalToolCallsInFlight
+            && networkState.text.trim().length > 0;
           const completionReady = completionTracker.update({
             responsePresent: snapshot.responsePresent,
             running,
@@ -5524,7 +5633,7 @@ export class ChatGptBrowserWorker {
             currentHtml: snapshot.fullHtml,
             completionActionVisible: snapshot.completionActionVisible,
             externalToolCallsInFlight,
-          });
+          }) || networkTerminal;
           if (!completionReady) completionFenceRevision = undefined;
           if (completionReady) {
             if (turn.completionFence) {
@@ -5554,6 +5663,22 @@ export class ChatGptBrowserWorker {
             if (snapshot.visibleText === "api_tool unavailable") {
               throw new Error("ChatGPT selected mode rejected the Codex Native MCP tool (api_tool unavailable)");
             }
+            let networkFinalState: ChatGptNetworkStreamState | undefined;
+            if (!checkpointStream && networkParser) {
+              networkFinalState = await readNetwork(true);
+              // The DOM can complete slightly before the SSE terminator. Give the stream a bounded
+              // settle window so its text can correct a truncated DOM projection.
+              for (let attempt = 0; attempt < 4 && networkFinalState?.status === "streaming"; attempt += 1) {
+                await new Promise(resolveSleep => setTimeout(resolveSleep, 250));
+                networkFinalState = await readNetwork(true);
+              }
+              if (networkFinalState?.status === "error") {
+                throw chatGptNetworkStreamError(networkFinalState);
+              }
+            }
+            const networkFinalText = !checkpointStream && networkFinalState?.status === "complete"
+              ? networkFinalState.text.trim()
+              : "";
             const final = (() => {
               try {
                 return markdownBuffer.finish();
@@ -5564,7 +5689,7 @@ export class ChatGptBrowserWorker {
                 throw error;
               }
             })();
-            if (!final.markdown && snapshot.visibleText) {
+            if (!final.markdown && !networkFinalText && snapshot.visibleText) {
               throw new Error("ChatGPT completed with visible text that could not be serialized as Markdown");
             }
             if (final.delta) emitMarkdownDelta(final.delta);
@@ -5574,8 +5699,26 @@ export class ChatGptBrowserWorker {
               if (completed.captured) turn.onLunaCheckpoint!(completed.captured);
               else console.warn(`[chatgpt-web] browser turn ${turn.traceId} completed without a Luna rolling checkpoint; preserving full native history`);
               finalText = completed.answer;
+            } else if (networkFinalText && !final.markdown) {
+              // The DOM never exposed a serializable answer; the stream is authoritative.
+              emitMarkdownDelta(networkFinalText);
+              finalText = networkFinalText;
+            } else if (networkFinalText
+              && final.markdown
+              && networkFinalText.startsWith(final.markdown)
+              && networkFinalText.length > final.markdown.length) {
+              // Recover a truncated DOM projection without duplicating the already-streamed prefix.
+              emitMarkdownDelta(networkFinalText.slice(final.markdown.length));
+              finalText = networkFinalText;
             } else {
               finalText = final.markdown;
+            }
+            if (networkFinalText) {
+              console.info(
+                `[chatgpt-web] network_stream_final trace=${turn.traceId}`
+                + ` domChars=${final.markdown.length} networkChars=${networkFinalText.length}`
+                + ` used=${finalText === networkFinalText}`,
+              );
             }
             const media = await withBrowserTurnAbort(
               captureChatGptMedia(responseTurn.locator, join(getConfigDir(), "artifacts"), turn.abortSignal), turn.abortSignal,
