@@ -16,6 +16,23 @@ export type BrowserInteractionMode = "automatic" | "manual";
 export type SubagentProtocol = "compatibility-v1" | "native";
 
 /**
+ * Optional native Codex/Responses transport. Disabled by default; when enabled, DSH can select
+ * Codex model slugs and the bridge forwards the Responses request to the ChatGPT-subscription
+ * backend with native function calling. The browser remains available as the fallback route.
+ */
+export interface NativeCodexConfig {
+  enabled?: boolean;
+  /** Codex auth.json path. Defaults to $CODEX_HOME/auth.json or ~/.codex/auth.json. */
+  authPath?: string;
+  /** Model slugs advertised to DSH. Defaults to the local Codex model cache or a built-in list. */
+  models?: string[];
+  /** Fall back to a chatgpt-web route when native authentication or rate limits fail. */
+  browserFallback?: boolean;
+  /** Browser route used when fallback is enabled. */
+  fallbackModel?: string;
+}
+
+/**
  * ChatGPT caches a connector's public MCP contract by connector identity. The direct turn-token
  * contract therefore has a new identity instead of mutating the retired connector in place.
  */
@@ -193,6 +210,8 @@ export interface AppConfig {
    * This replaces the OpenAI tunnel requirement for DSH-owned installations.
    */
   externalMcp?: ChatGptExternalMcpConfig;
+  /** Optional native Codex/Responses route; the browser remains the fallback. */
+  nativeCodex?: NativeCodexConfig;
   /** Optional adapter-silence budget for the Responses watchdog. */
   stallTimeoutSec?: number;
   /** Optional browser transport tuning; defaults apply per field when absent. */
@@ -660,6 +679,38 @@ function parseConfig(value: unknown, path: string): AppConfig {
   const proAvailable = parsed.proAvailable === true;
   const experimentalBiggerContext = parsed.experimentalBiggerContext === true;
   const zeroRiskProEnabled = parsed.zeroRiskProEnabled === true;
+  if (parsed.nativeCodex !== undefined) {
+    const native = parsed.nativeCodex;
+    if (!native || typeof native !== "object" || Array.isArray(native)) {
+      throw new Error(`Invalid nativeCodex in ${path}`);
+    }
+    if (native.enabled !== undefined && typeof native.enabled !== "boolean") {
+      throw new Error(`Invalid nativeCodex.enabled in ${path}`);
+    }
+    if (native.authPath !== undefined
+      && (typeof native.authPath !== "string" || native.authPath.trim().length === 0
+        || !isAbsolute(expandUserPath(native.authPath)))) {
+      throw new Error(`nativeCodex.authPath must be an absolute path in ${path}`);
+    }
+    if (native.models !== undefined
+      && (!Array.isArray(native.models)
+        || native.models.some(model => typeof model !== "string" || model.trim().length === 0))) {
+      throw new Error(`nativeCodex.models must be an array of non-empty model ids in ${path}`);
+    }
+    if (native.browserFallback !== undefined && typeof native.browserFallback !== "boolean") {
+      throw new Error(`Invalid nativeCodex.browserFallback in ${path}`);
+    }
+    if (native.fallbackModel !== undefined
+      && (typeof native.fallbackModel !== "string" || native.fallbackModel.trim().length === 0)) {
+      throw new Error(`Invalid nativeCodex.fallbackModel in ${path}`);
+    }
+    parsed.nativeCodex = {
+      ...native,
+      ...(native.authPath ? { authPath: expandUserPath(native.authPath) } : {}),
+      ...(native.models ? { models: native.models.map(model => model.trim()) } : {}),
+      ...(native.fallbackModel ? { fallbackModel: native.fallbackModel.trim() } : {}),
+    };
+  }
   if (browserInteractionMode === "manual" && experimentalBiggerContext) {
     throw new Error(`Zero Risk does not support Bigger Context in ${path}`);
   }
