@@ -1,5 +1,6 @@
 import type { Locator, Page } from "playwright-core";
 import { ChatGptWebAdapterError } from "./adapters/chatgpt-web/adapter-error";
+import { chatGptWebBackoffDelayMs } from "./adapters/chatgpt-web/backoff";
 import {
   CHATGPT_WEB_MODEL_ROW_LABELS,
   type ChatGptWebAccountCapabilities,
@@ -458,7 +459,10 @@ export async function assertAuthenticatedChatGptPage(page: Page): Promise<void> 
     }
     if (probe.kind === "authenticated") return;
     console.warn(`[chatgpt-web] session_check attempt=${attempt + 1} outcome=${probe.kind} status=${probe.status ?? "none"}`);
-    if (attempt < 2) await page.waitForTimeout(500 * (attempt + 1));
+    if (attempt < 2) {
+      // Exponential backoff with jitter so a boot-time network failure is not hammered.
+      await page.waitForTimeout(chatGptWebBackoffDelayMs(attempt + 1, { baseMs: 1_000, maxMs: 8_000 }));
+    }
   }
   if (probe.kind === "signed_out") {
     throw new ChatGptWebAdapterError(

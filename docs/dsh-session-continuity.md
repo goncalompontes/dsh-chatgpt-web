@@ -12,7 +12,31 @@ An observed session had grown to about 177,000 inline characters. Managed Chrome
 
 The composer tuning override is now absent by default, so the existing model/account-specific boundaries apply. An explicit override still works. DSH compaction is identified by its native request purpose, runs with no DSH tool capability, and returns an ordinary text checkpoint. It does not use Codex's synthetic `compaction` item protocol. Automatic compaction remains available when DSH needs to reduce its own replay history.
 
-ChatGPT still has finite context and individual-message limits. Retaining the web conversation avoids resending accumulated history in each composer message; it does not promise unlimited exact recall. After a sidecar restart, canonical replay must fit the selected model, or DSH needs to summarize it. The plugin checks genuine message and context limits before sending.
+ChatGPT still has finite context and individual-message limits. Retaining the web conversation avoids resending accumulated history in each composer message; it does not promise unlimited exact recall.
+
+## Context capacity and transport fit
+
+ChatGPT Web compacts its own conversation, so the model catalog advertises a conversation
+capacity rather than the measured single-message browser ceiling. The harness therefore no longer
+compacts (or reports a false overflow) merely because the canonical transcript exceeds that
+ceiling, and `auto_compact_token_limit` is raised to the same capacity.
+
+Retention is a browser-host capability, not a tool-mode feature: Pure Chat turns with a stable DSH
+session identity (or a `prompt_cache_key`) reuse their completed managed Chrome conversation as
+well, so each follow-up sends only its new instruction.
+
+When a fresh replay still cannot fit one browser message (a restarted sidecar, an edited history,
+an evicted tab), the adapter keeps the newest complete user turns, prepends a short note explaining
+that older history stays in the retained conversation, and submits that instead of failing. The
+selection uses a binary search over user-turn boundaries, keeping the immediately preceding plain
+assistant answer when one exists, so a tool result is never separated from its assistant call and
+the cost stays logarithmic. The original `context_length_exceeded` diagnosis only surfaces when
+even the newest turn alone is larger than one browser message; the plugin still checks genuine
+composer and message limits before sending.
+
+`tests/context-continuation.test.ts` covers the advertised capacity, Pure Chat retention across
+turns, and the omission note; `tests/acp-overflow-recovery.test.ts` verifies that an oversized ACP
+replay now completes while a checkpoint request still summarizes every source fragment.
 
 ## Validation
 

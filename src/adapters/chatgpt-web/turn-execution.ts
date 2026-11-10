@@ -2,13 +2,13 @@ import { createHash } from "node:crypto";
 import { dshCompactionEpoch } from "../../responses/dsh-context";
 import type { AdapterEvent, CodexParsedRequest } from "../../types";
 import type { BrokerToolRequest } from "./turn-broker";
-import { chatGptBrowserTabClosedError } from "./adapter-error";
+import { chatGptBrowserTabClosedError, ChatGptWebAdapterError } from "./adapter-error";
 import {
   extractChatGptCompactionSourceRevision,
   extractChatGptTurnIdentity,
   extractChatGptTurnUserRevision,
 } from "./environment";
-import { MAX_CHATGPT_BROWSER_TABS } from "./concurrency";
+import { MAX_CHATGPT_BROWSER_TABS, MIN_CHATGPT_BROWSER_TURNS } from "./concurrency";
 import { ChatGptBrowserAdmission } from "./browser-admission";
 import { BrowserAdmissionCapacityMonitor } from "./browser-capacity-monitor";
 import { BrowserCapacityController, type BrowserCapacitySample } from "./browser-capacity";
@@ -508,11 +508,38 @@ export class ChatGptTurnSession {
   }
 }
 
+/**
+ * After the client that owned a browser turn disconnects, the turn is kept alive so an exact
+ * reconnect can continue it. When no reconnect arrives within this grace window the turn is
+ * retired so its retained browser page and admission lease cannot block the queue forever.
+ */
+export const CHATGPT_WEB_ABANDONED_TURN_GRACE_MS = 60_000;
+
+/** Fallback: suspend retirement for a tool round whose caller never returns. */
+export const CHATGPT_WEB_SUSPENDED_TOOL_TURN_GRACE_MS = 20 * 60_000;
+
+/**
+ * A queued turn must eventually fail loudly instead of hanging behind a wedged browser lane.
+ * Long compaction rounds stay well below this, and a retryable 503 lets the caller back off.
+ */
+export function chatGptWebMaxAdmissionWaitMs(
+  value = process.env.DSH_CHATGPT_WEB_MAX_QUEUE_WAIT_MS,
+): number {
+  if (value === undefined || value === "") return 10 * 60_000;
+  if (!/^\d+$/.test(value) || Number(value) < 1_000 || Number(value) > 24 * 60 * 60_000) {
+    throw new Error("DSH_CHATGPT_WEB_MAX_QUEUE_WAIT_MS must be an integer between 1000 and 86400000");
+  }
+  return Number(value);
+}
+
+export const CHATGPT_WEB_MAX_ADMISSION_WAIT_MS = chatGptWebMaxAdmissionWaitMs();
+
 export class ChatGptTurnSessions {
   private readonly entries = new Map<string, ChatGptTurnSession>();
   private readonly conversationHeads = new Map<string, ChatGptTurnSession>();
   private readonly retirements = new Map<string, Promise<void>>();
   private readonly ownerRetirements = new Map<string, Promise<void>>();
+  private readonly abandoned = new Map<string, { session: ChatGptTurnSession; timer: ReturnType<typeof setTimeout> }>();
   private readonly checkpointPredecessors = new Map<string, { keys: Set<string>; updatedAt: number }>();
   private readonly conversationRetirements = new Map<string, Promise<void>>();
   private readonly admission = new ChatGptBrowserAdmission(MAX_CHATGPT_BROWSER_TABS);
@@ -543,6 +570,7 @@ export class ChatGptTurnSessions {
     const existing = this.entries.get(key);
     if (existing) {
       existing.touch();
+      this.clearAbandonedRetirement(key);
       return existing;
     }
     const active = [...this.entries.values()].filter(session => session.isActive()).length;
@@ -568,6 +596,7 @@ export class ChatGptTurnSessions {
     nativeTurnId?: string,
     nativeThreadId?: string,
     dshCheckpointEpoch?: string,
+    toolResultCallIds?: ReadonlySet<string>,
   ): Promise<ChatGptTurnSession> {
     const checkpointOwner = JSON.stringify([ownerKey, nativeThreadId, nativeTurnId]);
     for (;;) {
@@ -581,6 +610,7 @@ export class ChatGptTurnSessions {
       const existing = this.entries.get(key);
       if (existing) {
         existing.touch();
+        this.clearAbandonedRetirement(key);
         return existing;
       }
       const pending = this.retirements.get(key) ?? this.ownerRetirements.get(ownerKey);
@@ -594,6 +624,25 @@ export class ChatGptTurnSessions {
       if (activeOwner) {
         const [ownedKey, ownedSession] = activeOwner;
         if (ownedSession.supersededCheckpointKeys.has(key)) throw new Error("DSH request refers to a superseded checkpoint execution");
+        // A tool-result continuation normally keeps the exact execution key. If the caller
+        // rewrote the native turn identity (steering, reconnect after reconnect, or a dropped
+        // turn id), the key changes even though this request is the answer to that very turn's
+        // pending tool calls. Joining the active session here is the only way to break the
+        // otherwise permanent cycle: the active turn waits for results, and the results wait
+        // for the active turn to settle.
+        if (toolResultCallIds && toolResultCallIds.size > 0) {
+          const matched = [...toolResultCallIds]
+            .filter(callId => outstandingChatGptToolCallId(callId, ownedSession) !== undefined);
+          if (matched.length > 0) {
+            console.info(
+              `[chatgpt-web] joining active browser turn trace=${traceId ?? "?"} ownerTrace=${ownedSession.traceId ?? "?"}`
+              + ` because ${matched.length}/${toolResultCallIds.size} tool result(s) match its outstanding call(s)`,
+            );
+            ownedSession.touch();
+            this.clearAbandonedRetirement(ownedKey);
+            return ownedSession;
+          }
+        }
         if (dshCheckpointEpoch && nativeTurnId && nativeThreadId
           && ownedSession.nativeTurnId === nativeTurnId && ownedSession.nativeThreadId === nativeThreadId
           && ownedSession.dshCheckpointEpoch !== dshCheckpointEpoch) {
@@ -622,11 +671,61 @@ export class ChatGptTurnSessions {
         // same-turn checkpoint transition above may preempt an active owner.
         // A failed launcher teardown has still physically settled. Do not poison the next
         // native owner's admission with the previous helper's cleanup error.
+        console.info(
+          `[chatgpt-web] waiting for active owner trace=${traceId ?? "?"} ownerTrace=${ownedSession.traceId ?? "?"}`
+          + ` outstanding_tools=${ownedSession.outstanding().length}`,
+        );
         await awaitWithAbort(ownedSession.physicalSettlement.then(() => {}, () => {}), signal);
         continue;
       }
       this.capacityMonitor?.start();
-      const release = await this.admission.acquire(signal);
+      const queuedAt = Date.now();
+      const before = this.admission.snapshot();
+      if (before.pending > 0 || before.active >= before.capacity) {
+        console.info(
+          `[chatgpt-web] browser admission queued trace=${traceId ?? "?"}`
+          + ` active=${before.active} capacity=${before.capacity} pending=${before.pending}`,
+        );
+      }
+      const queueAbort = new AbortController();
+      const forwardAbort = () => queueAbort.abort();
+      signal?.addEventListener("abort", forwardAbort, { once: true });
+      let admissionTimedOut = false;
+      const admissionTimer = setTimeout(() => {
+        admissionTimedOut = true;
+        queueAbort.abort();
+      }, CHATGPT_WEB_MAX_ADMISSION_WAIT_MS);
+      admissionTimer.unref?.();
+      let release: () => void;
+      try {
+        release = await this.admission.acquire(queueAbort.signal);
+      } catch (error) {
+        if (signal?.aborted) throw error;
+        if (admissionTimedOut) {
+          const minutes = Math.round(CHATGPT_WEB_MAX_ADMISSION_WAIT_MS / 60_000);
+          console.warn(
+            `[chatgpt-web] browser admission wait exceeded ${minutes}m trace=${traceId ?? "?"}`
+            + ` active=${this.admission.snapshot().active} pending=${this.admission.snapshot().pending}`,
+          );
+          throw new ChatGptWebAdapterError(
+            `ChatGPT Web stayed busy for ${minutes} minutes, so this turn never reached a browser tab. Retry after the active turns finish.`,
+            {
+              status: 503,
+              errorType: "server_error",
+              code: "chatgpt_admission_timeout",
+              retryable: true,
+            },
+          );
+        }
+        throw error;
+      } finally {
+        clearTimeout(admissionTimer);
+        signal?.removeEventListener("abort", forwardAbort);
+      }
+      const waitMs = Date.now() - queuedAt;
+      if (waitMs >= 1_000) {
+        console.info(`[chatgpt-web] browser admission granted trace=${traceId ?? "?"} waitMs=${waitMs}`);
+      }
       let transferred = false;
       try {
         if (signal?.aborted) throw new DOMException("ChatGPT web turn aborted", "AbortError");
@@ -669,7 +768,22 @@ export class ChatGptTurnSessions {
   find(key: string): ChatGptTurnSession | undefined {
     const session = this.entries.get(key);
     session?.touch();
+    if (session) this.clearAbandonedRetirement(key);
     return session;
+  }
+
+  /** Registry key currently owning this session (a joined continuation may hold a different one). */
+  keyFor(session: ChatGptTurnSession): string | undefined {
+    for (const [key, candidate] of this.entries) {
+      if (candidate === session) return key;
+    }
+    return undefined;
+  }
+
+  /** Retire by session identity when the caller's execution key was rewritten mid-turn. */
+  retireSession(session: ChatGptTurnSession): boolean {
+    const key = this.keyFor(session);
+    return key !== undefined && this.retire(key, session);
   }
 
   findConversationHead(conversationKey: string): ChatGptTurnSession | undefined {
@@ -763,6 +877,61 @@ export class ChatGptTurnSessions {
 
   async waitForRetirement(key: string): Promise<void> {
     await this.retirements.get(key);
+  }
+
+  /**
+   * Retire a browser turn when its owning client never reconnects. The turn is kept alive for
+   * exact reconnects, but a cancelled/interrupted caller or a dropped HTTP stream otherwise
+   * leaves its retained page and admission lease held forever, starving every queued turn.
+   */
+  scheduleAbandonedRetirement(
+    key: string,
+    session: ChatGptTurnSession,
+    delayMs = CHATGPT_WEB_ABANDONED_TURN_GRACE_MS,
+  ): void {
+    if (this.entries.get(key) !== session) return;
+    this.clearAbandonedRetirement(key);
+    const timer = setTimeout(() => {
+      const current = this.abandoned.get(key);
+      if (!current || current.session !== session) return;
+      this.abandoned.delete(key);
+      if (this.entries.get(key) !== session || session.isPhysicallySettled()) return;
+      console.warn(
+        `[chatgpt-web] retiring abandoned browser turn trace=${session.traceId ?? "?"}`
+        + ` after ${delayMs}ms without a reconnect (outstanding_tools=${session.outstanding().length})`,
+      );
+      this.retire(key, session);
+    }, Math.max(1, delayMs));
+    timer.unref?.();
+    this.abandoned.set(key, { session, timer });
+  }
+
+  /** Schedule abandonment for every active turn of one trace (used when its HTTP stream closes). */
+  scheduleAbandonedRetirementForTrace(
+    traceId: string,
+    delayMs = CHATGPT_WEB_ABANDONED_TURN_GRACE_MS,
+  ): void {
+    for (const [key, session] of this.entries) {
+      if (session.traceId === traceId && session.isActive()) {
+        this.scheduleAbandonedRetirement(key, session, delayMs);
+      }
+    }
+  }
+
+  /** Schedule abandonment by session identity when the request key may have been rewritten. */
+  scheduleAbandonedRetirementForSession(
+    session: ChatGptTurnSession,
+    delayMs = CHATGPT_WEB_ABANDONED_TURN_GRACE_MS,
+  ): void {
+    const key = this.keyFor(session);
+    if (key !== undefined) this.scheduleAbandonedRetirement(key, session, delayMs);
+  }
+
+  clearAbandonedRetirement(key: string): void {
+    const entry = this.abandoned.get(key);
+    if (!entry) return;
+    clearTimeout(entry.timer);
+    this.abandoned.delete(key);
   }
 
   async retireAndWait(key: string, signal?: AbortSignal): Promise<boolean> {
@@ -872,6 +1041,7 @@ export class ChatGptTurnSessions {
 
   admissionMetrics() {
     return { ...this.admission.metrics(), maxCapacity: MAX_CHATGPT_BROWSER_TABS,
+      minCapacity: MIN_CHATGPT_BROWSER_TURNS,
       resources: this.capacityMonitor?.resources() ?? null };
   }
 
@@ -879,6 +1049,7 @@ export class ChatGptTurnSessions {
     const cutoff = Date.now() - this.ttlMs;
     for (const [key, session] of this.entries) {
       if (session.isActive() || session.lastUsedAt() >= cutoff) continue;
+      this.clearAbandonedRetirement(key);
       session.cancel();
       this.entries.delete(key);
       this.forgetConversationHead(session);
@@ -895,6 +1066,7 @@ export class ChatGptTurnSessions {
   private beginRetirement(key: string, session: ChatGptTurnSession, reason?: Error): Promise<void> {
     const existing = this.retirements.get(key);
     if (existing) return existing;
+    this.clearAbandonedRetirement(key);
     const conversationKey = session.conversationKey();
     session.cancel(reason);
     const retirement = session.physicalSettlement;

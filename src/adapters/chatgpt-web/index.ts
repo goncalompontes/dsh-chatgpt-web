@@ -23,15 +23,21 @@ import { namespacedToolName, type AdapterEvent, type CodexContentPart, type Code
 import type { ProviderAdapter } from "../base";
 import { parseDataUrl } from "../image";
 import { ChatGptSurfaceStaleError, ChatGptWebAdapterError } from "./adapter-error";
+import { sleep } from "./backoff";
 import { assertChatGptWebInputWithinLimits, ChatGptBrowserWorker, redactChatGptUiDiagnostic } from "./browser-worker";
 import { extractChatGptTurnEnvironment, extractChatGptTurnIdentity, priorChatGptAbortedTurnIds } from "./environment";
 import { CHATGPT_WEB_LUNA_MODEL_ID, resolveChatGptWebCompactionModel, resolveChatGptWebModelMode, type ChatGptWebCapabilities } from "./model";
-import { chatGptReadOnlyContextWarning, compileChatGptWebPrompt } from "./prompt";
+import {
+  chatGptReadOnlyContextWarning,
+  compileChatGptWebPrompt,
+  type CompiledChatGptWebPrompt,
+  type CompileChatGptWebPromptOptions,
+} from "./prompt";
 import { createChatGptStructuredOutputValidator } from "./output-validation";
 import { ChatGptToolStreamParser, type ParsedToolCall } from "./tool-stream-parser";
 import { chatGptWebTurnRetryPolicy } from "./retry-policy";
 import { TurnBroker, type BrokerToolRequest, type BrokerToolResult, type TurnBrokerOwner } from "./turn-broker";
-import { ChatGptTextFeed, ChatGptTraceFeed, chatGptCompactionSourceExecutionKey, chatGptThreadOwnershipKey, chatGptTurnExecutionKey, chatGptTurnRetryKey, chatGptTurnRoundKey, chatGptTurnSessions, outstandingChatGptToolCallId, type ChatGptBrowserOutcome, type ChatGptTraceEvent, type ChatGptTurnRuntime, type ChatGptTurnSession } from "./turn-execution";
+import { ChatGptTextFeed, ChatGptTraceFeed, CHATGPT_WEB_ABANDONED_TURN_GRACE_MS, CHATGPT_WEB_SUSPENDED_TOOL_TURN_GRACE_MS, chatGptCompactionSourceExecutionKey, chatGptThreadOwnershipKey, chatGptTurnExecutionKey, chatGptTurnRetryKey, chatGptTurnRoundKey, chatGptTurnSessions, outstandingChatGptToolCallId, type ChatGptBrowserOutcome, type ChatGptTraceEvent, type ChatGptTurnRuntime, type ChatGptTurnSession } from "./turn-execution";
 import { estimateChatGptWebUsage, resolveBiggerContextMultipartParts, type ChatGptWebInputAccounting, type ChatGptWebRoundEvidence } from "./usage";
 import { compiledChatGptWebMaxMessageChars, estimateCompiledChatGptWebInputTokens, estimateCompiledChatGptWebMessageTokens } from "./input-tokens";
 import { runBoundedTextCompaction } from "./text-compaction";
@@ -55,6 +61,7 @@ import {
   retainedConversationResumeRequest,
 } from "./conversation-key";
 import { conversationHistoryFingerprint, conversationPredecessorFingerprint } from "./managed-conversation";
+import { historyTrimCandidates, withoutOldestHistory } from "./context-fit";
 
 function extractLatestUserPrompt(parsed: CodexParsedRequest): string {
   const messages = parsed.context.messages ?? [];
@@ -436,7 +443,10 @@ export function createChatGptWebAdapter(
     && provider.chatgptWeb.browserHostDescriptorPath
       ? resolve(expandUserPath(provider.chatgptWeb.browserHostDescriptorPath))
       : undefined;
-  const managedConversationRetention = provider.chatgptWeb?.browserHost === "managed-chrome" && Boolean(externalMcp);
+  // Retained conversations are a browser-host capability, not a tool-mode feature. Pure Chat
+  // sessions reuse the completed ChatGPT chat too, so later turns only send the new instruction and
+  // ChatGPT can compact its own conversation instead of the bridge replaying the whole history.
+  const managedConversationRetention = (provider.chatgptWeb?.browserHost ?? "managed-chrome") === "managed-chrome";
   if (manualInteraction) {
     if (!configuredCapabilities.localToolsEnabled) {
       throw new Error("ChatGPT Zero Risk requires the Full Codex harness");
@@ -527,12 +537,18 @@ export function createChatGptWebAdapter(
       console.info(`[chatgpt-web] input_accounting trace=${traceId} scope=browser_submission input_tokens=${inputAccounting.inputTokens} canonical_messages=${checkpointInput.parsed.context.messages.length} submitted_messages=${input.context.messages.length}`);
       return { ...compiled, release: () => {} };
     };
+    // A retained chat needs a stable session identity. Tool-capable turns already require one, but a
+    // Pure Chat session that carries DSH's session header or a prompt cache key can reuse its
+    // completed ChatGPT conversation as well, so follow-ups never replay the canonical history.
+    const conversationSessionIdentity = Boolean(identity.promptCacheKey)
+      || typeof (parsed._rawBody as { _dshSessionId?: unknown })?._dshSessionId === "string";
     const conversationKey = !parsed._compactionRequest
       && parsed.modelId !== CHATGPT_WEB_LUNA_MODEL_ID
-      && mode.localTools
       && !parsed._dshRequestPurpose
-      && (!managedConversationRetention || identity.promptCacheKey ||
-        typeof (parsed._rawBody as { _dshSessionId?: unknown })?._dshSessionId === "string")
+      // A Pure Chat turn only retains when it carries a stable session identity. Tool-capable
+      // launcher turns keep their previous behavior and may rely on the native thread identity.
+      && (mode.localTools || conversationSessionIdentity)
+      && (!managedConversationRetention || conversationSessionIdentity)
       && (retainedLauncherDescriptor || managedConversationRetention)
       ? chatGptConversationKey(checkpointInput.parsed, executionNamespace)
       : undefined;
@@ -558,6 +574,80 @@ export function createChatGptWebAdapter(
           ? { experimentalMultipartParts }
           : {}),
       };
+    };
+    // Manual Zero Risk never reaches this helper; the fallback only satisfies the union type.
+    const transportEffort = "effort" in mode ? mode.effort : "low" as const;
+    const transportFits = (compiled: CompiledChatGptWebPrompt): boolean => {
+      if (compiled.multipart) return true;
+      try {
+        assertChatGptWebInputWithinLimits(
+          estimateCompiledChatGptWebInputTokens(compiled, parsed.modelId),
+          estimateCompiledChatGptWebMessageTokens(compiled, parsed.modelId),
+          parsed.modelId,
+          transportEffort,
+          turnCapabilities,
+          compiledChatGptWebMaxMessageChars(compiled),
+          provider.chatgptWeb?.tuning?.composerCharLimit,
+        );
+        return true;
+      } catch (error) {
+        if (error instanceof ChatGptWebAdapterError && error.code === "context_length_exceeded") return false;
+        throw error;
+      }
+    };
+    /**
+     * ChatGPT Web owns its conversation and compacts it internally, so a canonical replay that is
+     * larger than one browser message is a transport-fit problem, not a fatal context error. Keep
+     * the full history when it fits; otherwise retain the newest complete turns and continue in the
+     * (retained) ChatGPT conversation. The original transport diagnosis only surfaces when even the
+     * newest turn alone cannot be submitted.
+     */
+    const compileFittingPrompt = (
+      input: CodexParsedRequest,
+      token: string | undefined,
+      options: CompileChatGptWebPromptOptions | undefined,
+    ): { compiled: CompiledChatGptWebPrompt; input: CodexParsedRequest } => {
+      const compiled = compileChatGptWebPrompt(input, turnCapabilities, token, options);
+      if (transportFits(compiled)) return { compiled, input };
+      const candidates = historyTrimCandidates(input.context.messages);
+      // Keeping fewer leading messages can only shrink the compiled prompt, so binary-search the
+      // smallest retained window that fits instead of recompiling once per turn.
+      let low = 1;
+      let high = candidates.length - 1;
+      let best: { compiled: CompiledChatGptWebPrompt; input: CodexParsedRequest } | undefined;
+      let omittedMessages = 0;
+      while (low <= high) {
+        const middle = (low + high) >> 1;
+        const start = candidates[middle]!;
+        const trimmed = withoutOldestHistory(input, start);
+        const attempt = compileChatGptWebPrompt(trimmed, turnCapabilities, token, options);
+        if (transportFits(attempt)) {
+          best = { compiled: attempt, input: trimmed };
+          omittedMessages = start;
+          high = middle - 1;
+        } else {
+          low = middle + 1;
+        }
+      }
+      if (!best) {
+        // Nothing can be omitted; rethrow the precise transport diagnosis for the full history.
+        assertChatGptWebInputWithinLimits(
+          estimateCompiledChatGptWebInputTokens(compiled, parsed.modelId),
+          estimateCompiledChatGptWebMessageTokens(compiled, parsed.modelId),
+          parsed.modelId,
+          transportEffort,
+          turnCapabilities,
+          compiledChatGptWebMaxMessageChars(compiled),
+          provider.chatgptWeb?.tuning?.composerCharLimit,
+        );
+        return { compiled, input };
+      }
+      console.warn(
+        `[chatgpt-web] transport_fit_recovery trace=${traceId} model=${parsed.modelId}`
+        + ` canonical_messages=${input.context.messages.length} omitted_messages=${omittedMessages}`
+        + ` submitted_messages=${best.input.context.messages.length}`,
+      );
+      return best;
     };
     if (captureLunaCheckpoint) {
       console.info(
@@ -781,10 +871,12 @@ export function createChatGptWebAdapter(
     }
     if (!mode.localTools) {
       const runReadOnly = async (): Promise<string> => {
-        const compiled = compileChatGptWebPrompt(
-          checkpointInput.parsed, turnCapabilities, undefined, compileOptionsFor(checkpointInput.parsed),
-        );
         if (dshTextCompaction) {
+          // A checkpoint must summarize the complete canonical history, so it never uses the
+          // transport fit recovery below. Bounded partitioning keeps every source character.
+          const compiled = compileChatGptWebPrompt(
+            checkpointInput.parsed, turnCapabilities, undefined, compileOptionsFor(checkpointInput.parsed),
+          );
           const compactionModel = resolveChatGptWebCompactionModel(parsed.modelId);
           console.info(`[chatgpt-web] dsh_text_compaction_model trace=${traceId} model=${compactionModel.modelId} reasoning=${compactionModel.reasoning}`);
           // A checkpoint can use the existing chat only when its exact canonical predecessor is
@@ -850,12 +942,41 @@ export function createChatGptWebAdapter(
           text.push(answer);
           return answer;
         }
+        // Compile lazily: a resumed conversation only ever submits the small suffix, so the large
+        // canonical replay is tokenized and trimmed only when a fresh chat actually needs it.
         return worker.run({
           traceId,
           modelId: parsed.modelId,
           reasoning: parsed.options.reasoning,
           capabilities: turnCapabilities,
-          prepare: async () => accountPrepared(compiled, checkpointInput.parsed),
+          prepare: async () => {
+            const prepared = compileFittingPrompt(
+              checkpointInput.parsed, undefined, compileOptionsFor(checkpointInput.parsed),
+            );
+            return accountPrepared(prepared.compiled, prepared.input);
+          },
+          ...(resumeInput
+            ? {
+              prepareResume: async () => {
+                const prepared = compileFittingPrompt(
+                  resumeInput, undefined, compileOptionsFor(resumeInput),
+                );
+                return accountPrepared(prepared.compiled, prepared.input);
+              },
+            }
+            : {}),
+          // ChatGPT keeps its own conversation and compacts it internally. Reusing the completed
+          // chat lets the next Pure Chat turn send only its new instruction instead of replaying
+          // canonical history into the browser composer.
+          ...(conversationKey
+            ? {
+              retainConversation: true,
+              conversationKey,
+              ...(managedConversationRetention
+                ? { conversationPredecessor: conversationPredecessorFingerprint(checkpointInput.parsed.context.messages) }
+                : {}),
+            }
+            : {}),
           abortSignal: browserAbort.signal,
           ...(parsed._compactionRequest ? { compaction: true } : {}),
           ...submissionLifecycle,
@@ -868,7 +989,19 @@ export function createChatGptWebAdapter(
           } : {}),
         });
       };
-      const browserTurn = cancellableBrowserTurn(finalizeCheckpoint(runReadOnly()), browserAbort);
+      const recordReadOnlyHistory = (answer: string): string => {
+        if (conversationKey && managedConversationRetention) {
+          worker.commitManagedConversation(conversationKey, conversationHistoryFingerprint([
+            ...checkpointInput.parsed.context.messages,
+            { role: "assistant", content: [{ type: "text", text: answer }], timestamp: 0 },
+          ]));
+        }
+        return answer;
+      };
+      const browserTurn = cancellableBrowserTurn(
+        finalizeCheckpoint(runReadOnly()).then(recordReadOnlyHistory),
+        browserAbort,
+      );
       return {
         mode: "read-only",
         browser: browserTurn.browser,
@@ -899,13 +1032,8 @@ export function createChatGptWebAdapter(
         token.resolve(turnToken);
       }
       try {
-        const compiled = compileChatGptWebPrompt(
-          input,
-          turnCapabilities,
-          turnToken,
-          compileOptionsFor(input),
-        );
-        return accountPrepared(compiled, input);
+        const prepared = compileFittingPrompt(input, turnToken, compileOptionsFor(input));
+        return accountPrepared(prepared.compiled, prepared.input);
       } catch (error) {
         await broker.revoke(turnToken);
         activeToken = undefined;
@@ -1291,16 +1419,49 @@ export function createChatGptWebAdapter(
         const roundKey = chatGptTurnRoundKey(parsed);
         const roundHash = createHash("sha256").update(roundKey).digest("hex").slice(0, 12);
         console.info(`[chatgpt-web] continuation_entry trace=${traceId} identity=${identityHash} round=${roundHash} tool_results=${parsed.context.messages.filter(message => message.role === "toolResult").length}`);
-        const session = await chatGptTurnSessions.getOrCreateAfterOwnerRetirement(
-          executionKey,
-          ownerKey,
-          () => startRuntime(parsed, environment, traceId, turnCapabilities),
-          traceId,
-          incoming.abortSignal,
-          nativeTurnId,
-          nativeIdentity.threadId,
-          dshCompactionEpoch(parsed),
+        const incomingToolResultCallIds = new Set(
+          parsed.context.messages
+            .filter(message => message.role === "toolResult")
+            .map(message => message.toolCallId)
+            .filter((callId): callId is string => typeof callId === "string" && callId.length > 0),
         );
+        let session: ChatGptTurnSession;
+        try {
+          session = await chatGptTurnSessions.getOrCreateAfterOwnerRetirement(
+            executionKey,
+            ownerKey,
+            () => startRuntime(parsed, environment, traceId, turnCapabilities),
+            traceId,
+            incoming.abortSignal,
+            nativeTurnId,
+            nativeIdentity.threadId,
+            dshCompactionEpoch(parsed),
+            incomingToolResultCallIds.size > 0 ? incomingToolResultCallIds : undefined,
+          );
+        } catch (error) {
+          // Admission/queue failures happen before a session exists, so preserve their explicit
+          // status, code and retryability instead of letting the HTTP bridge re-infer them from text.
+          if (error instanceof ChatGptWebAdapterError) {
+            emit({
+              type: "error",
+              message: error.message,
+              status: error.status,
+              errorType: error.errorType,
+              code: error.code,
+              retryable: error.retryable,
+            });
+            return;
+          }
+          throw error;
+        }
+        const keepSuspendedToolRoundReconnectable = (): void => {
+          // A suspended tool round waits for the next HTTP request. If that request never
+          // arrives, this timer retires the turn so its browser lease cannot block the queue.
+          chatGptTurnSessions.scheduleAbandonedRetirementForSession(
+            session,
+            CHATGPT_WEB_SUSPENDED_TOOL_TURN_GRACE_MS,
+          );
+        };
         let roundInputAccounting: ChatGptWebInputAccounting | undefined;
         const roundUsage = (evidence: ChatGptWebRoundEvidence): CodexUsage => estimateChatGptWebUsage(
           currentUsageInput(parsed), evidence, turnCapabilities,
@@ -1389,6 +1550,7 @@ export function createChatGptWebAdapter(
                     buffer,
                   ));
                   session.completeRound(roundKey);
+                  keepSuspendedToolRoundReconnectable();
                   chatGptWebTurnRetryPolicy.clear(retryKey);
                   return;
                 }
@@ -1579,6 +1741,7 @@ export function createChatGptWebAdapter(
                     buffer,
                   ));
                   session.completeRound(roundKey);
+                  keepSuspendedToolRoundReconnectable();
                   chatGptWebTurnRetryPolicy.clear(retryKey);
                   return;
                 }
@@ -1654,6 +1817,7 @@ export function createChatGptWebAdapter(
                   buffer,
                 ));
                 session.completeRound(roundKey);
+                keepSuspendedToolRoundReconnectable();
                 return;
               }
             } finally {
@@ -1667,7 +1831,14 @@ export function createChatGptWebAdapter(
               // work from a stopped native turn. A closed Responses stream is therefore terminal:
               // revoke the MCP capability and release the Launcher tab instead of leaving a task
               // that Codex already shows as stopped waiting forever.
-              chatGptTurnSessions.retire(executionKey, session);
+              chatGptTurnSessions.retireSession(session);
+            } else {
+              // Automatic browser turns keep their exact execution and journal for reconnect, but
+              // a cancelled/interrupted caller must not pin the only browser admission lease.
+              chatGptTurnSessions.scheduleAbandonedRetirementForSession(
+                session,
+                CHATGPT_WEB_ABANDONED_TURN_GRACE_MS,
+              );
             }
             // Automatic browser turns keep their exact execution and journal for reconnect. Their
             // owned DOM observer can continue proving the same accepted ChatGPT submission.
@@ -1687,12 +1858,20 @@ export function createChatGptWebAdapter(
             // instead of replaying one rejected browser outcome for the registry's full TTL.
             session.cancel();
           } else {
-            chatGptTurnSessions.retire(executionKey, session);
+            chatGptTurnSessions.retireSession(session);
           }
           if (session.runtime.mode === "tools") {
             void session.runtime.token.then(turnToken => broker.revoke(turnToken)).catch(() => {});
           }
           if (handledError instanceof ChatGptWebAdapterError) {
+            if (handledError.retryable) {
+              // Pace caller-driven retries: Codex resends a retryable request immediately, so a
+              // short exponential backoff here prevents a tight browser-turn loop under limits.
+              const delayMs = chatGptWebTurnRetryPolicy.retryDelayMs(retryKey);
+              if (delayMs > 0) {
+                await withAbort(sleep(delayMs), incoming.abortSignal).catch(() => {});
+              }
+            }
             emitRoundEvent({
               type: "error",
               message: handledError.message,

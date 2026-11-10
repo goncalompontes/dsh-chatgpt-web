@@ -6,6 +6,17 @@ shared ceiling defaults to 32 and can be set with
 `DSH_CHATGPT_WEB_MAX_TURNS=1..128` in the sidecar launch environment. A ceiling is
 not a reservation: capacity still starts at one and depends on available resources.
 
+Every turn runs in its own tab of one shared Chrome (`context.newPage()`), so
+concurrent turns share the browser process and its base memory. Admission
+capacity is nevertheless estimated conservatively: on a memory-tight host the
+estimate is one tab even though the tab machinery supports more. Hosts that
+intentionally want more tabs can set
+`DSH_CHATGPT_WEB_MIN_TURNS=1..MAX_TURNS`; the admission controller treats it as a
+floor and will keep that many tabs regardless of the memory estimate. The
+ceiling (`DSH_CHATGPT_WEB_MAX_TURNS`) still applies, and `/healthz` reports the
+effective `minCapacity` and `maxCapacity`. Raising the floor is an explicit
+availability/swap trade-off, not a safe default.
+
 On Linux/WSL2, the sampler reads this sidecar's descendant process RSS and CPU
 ticks every ten seconds while active work or waiters exist. It identifies process
 generations with PID and start time, excludes guest counters from host CPU tick

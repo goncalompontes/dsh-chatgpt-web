@@ -77,6 +77,21 @@ dsh-chatgpt-web setup --chrome "C:\Program Files\Google\Chrome\Application\chrom
 **Solution:**
 - Upgrade to `dsh-chatgpt-web` `>=1.0.5`, which includes multi-strategy send button resolution and localized aria-label fallbacks.
 
+### 8. `server_is_overloaded` / "server is overloaded" after a working session
+**Cause:** This was usually a misreported expired ChatGPT Web login. When the saved session is gone, ChatGPT redirects the browser profile to `/auth/login`; older builds then waited out the composer timeout and reported the generic "unavailable" wording as upstream overload, even though ChatGPT never returned a 503.
+**Solution:**
+- If the diagnostic screenshot or page URL shows `/auth/login`, run `dsh-chatgpt-web login` and retry.
+- Current builds detect the login redirect immediately and report an authentication error (`chatgpt_session_expired`) instead of `server_is_overloaded`.
+- Transient Temporary Chat bootstrap, session-check and rate-limit failures are retried with exponential backoff and jitter before the turn is failed; a genuine ChatGPT overload still surfaces as `server_is_overloaded` so clients can retry it with their own backoff.
+
+### 9. Turns and subagents sit in the queue with no tool calls
+**Cause:** All ChatGPT Web turns share one browser admission queue. On a memory-tight host the adaptive capacity can be a single tab, so long turns (especially compaction) serialize everything behind them. A turn whose caller was cancelled used to keep its browser lease, which wedged the queue until the sidecar restarted; a tool-result continuation that arrived with a rewritten turn identity could also deadlock against its own suspended turn.
+**Solution:**
+- Current builds retire an abandoned turn after a short grace period, and a continuation whose tool results match the suspended turn joins it instead of waiting forever.
+- `browser_admission.resources` plus the `browser tab capacity` and `browser admission queued/granted` log lines show whether the queue is moving and why capacity changed.
+- A turn that waits more than 10 minutes for a browser tab now fails with a retryable `chatgpt_admission_timeout` instead of hanging forever. Tune with `DSH_CHATGPT_WEB_MAX_QUEUE_WAIT_MS` (1000–86400000 ms).
+- To allow more parallel tabs on a host you know has memory to spare, set `DSH_CHATGPT_WEB_MIN_TURNS` (for example `2`) in the sidecar environment. Keep `DSH_CHATGPT_WEB_MAX_TURNS` as the hard ceiling. This trades memory safety for throughput; watch for swap growth.
+
 ## Update and Uninstall
 
 To update `dsh-chatgpt-web`, pull the latest changes and rebuild:

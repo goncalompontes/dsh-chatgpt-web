@@ -8,7 +8,7 @@ const capabilities = {
     sandboxPolicy: "workspaceWrite" as const },
 };
 
-test("external MCP carries the current profile's native schema and a DSH-only recovery route", () => {
+test("external MCP carries the current profile's native schema and the single tool_call route", () => {
   const parameters = { type: "object", properties: { file_path: { type: "string" } }, required: ["file_path"] };
   const parsed = parseRequest({ model: "gpt-6", reasoning: { effort: "high" }, input: [
     { role: "user", content: "Inspect this project" },
@@ -16,12 +16,14 @@ test("external MCP carries the current profile's native schema and a DSH-only re
   const prompt = compileChatGptWebPrompt(parsed, capabilities, "turn_current_capability_12345").text;
   const inventory = JSON.parse(prompt.split("<dsh_tool_inventory_json>\n")[1]!.split("\n</dsh_tool_inventory_json>")[0]!);
   expect(inventory).toEqual([{ wire_name: "read", description: "Read a DSH file", kind: "function", parameters }]);
-  expect(prompt).toContain('{"query":"dsh","server":"dsh","limit":100}');
-  expect(prompt).toContain('name "dsh:<wire_name>"');
-  expect(prompt).toContain('timeout_s:660');
-  expect(prompt).toContain("Do not use dsh:codex_tool_inventory or dsh:codex_tool_call for recovery");
-  expect(prompt).not.toContain("only as a compatibility fallback");
+  expect(prompt).toContain("The connector exposes exactly one tool: tool_call");
+  expect(prompt).toContain('"action":"inventory"');
+  expect(prompt).toContain("tool_call.calls");
+  expect(prompt).toContain("Report an unavailable tool instead");
   expect(prompt).toContain("Report an invalid-token failure only when an actual tool response proves it");
+  expect(prompt).not.toContain("mcp_tool_search");
+  expect(prompt).not.toContain("mcp_tool_call");
+  expect(prompt).not.toContain("dsh_parallel");
 });
 
 test("compaction never receives the DSH inventory or discovery instructions", () => {
@@ -29,7 +31,7 @@ test("compaction never receives the DSH inventory or discovery instructions", ()
   parsed._compactionRequest = true;
   const prompt = compileChatGptWebPrompt(parsed, { ...capabilities, localToolsEnabled: false, externalMcp: undefined }).text;
   expect(prompt).not.toContain("<dsh_tool_inventory_json>");
-  expect(prompt).not.toContain("mcp_tool_search");
+  expect(prompt).not.toContain("tool_call");
 });
 
 test("a fresh browser with recorded tool results resumes remaining work instead of restarting", () => {

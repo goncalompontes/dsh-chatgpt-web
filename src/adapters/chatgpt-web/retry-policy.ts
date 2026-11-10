@@ -1,4 +1,5 @@
 import { ChatGptWebAdapterError } from "./adapter-error";
+import { chatGptWebBackoffDelayMs, chatGptWebRetryAfterMs } from "./backoff";
 
 /** Maximum number of automatic browser-turn retries after the initial send. */
 export const MAX_CHATGPT_WEB_TURN_RETRIES = 3;
@@ -57,6 +58,18 @@ export class ChatGptWebTurnRetryPolicy {
     this.prune(now);
     const entry = this.entries.get(key);
     return entry && entry.retries > MAX_CHATGPT_WEB_TURN_RETRIES ? exhaustedError(entry) : undefined;
+  }
+  /**
+   * Backoff the next caller-driven retry should observe for this turn. Codex retries a retryable
+   * HTTP failure immediately; delaying the terminal error event paces those retries instead of
+   * launching another browser turn in a tight loop. Honors an upstream "try again in Ns" hint.
+   */
+  retryDelayMs(key: string, now = Date.now()): number {
+    this.prune(now);
+    const entry = this.entries.get(key);
+    if (!entry || entry.retries > MAX_CHATGPT_WEB_TURN_RETRIES) return 0;
+    return chatGptWebRetryAfterMs(entry.lastError.message)
+      ?? chatGptWebBackoffDelayMs(entry.retries, { maxMs: 8_000 });
   }
 
   clear(key: string): void {

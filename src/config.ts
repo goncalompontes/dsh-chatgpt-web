@@ -8,6 +8,7 @@ import {
   CHATGPT_WEB_ZERO_RISK_PRO_BACKEND_MODEL,
 } from "./chatgpt-web-models";
 import type { ChatGptExternalMcpConfig, CodexProviderConfig } from "./types";
+import type { McpExecutorConfig } from "./tool-gateway/mcp-executor";
 import { VERSION } from "./version";
 
 export type RuntimeMode = "browser-only" | "full";
@@ -193,12 +194,25 @@ export interface AppConfig {
    * This replaces the OpenAI tunnel requirement for DSH-owned installations.
    */
   externalMcp?: ChatGptExternalMcpConfig;
+  /**
+   * Optional direct tool executor. When set, tool_call invokes the configured MCP server
+   * instead of routing through a native harness adapter. This is the harness-agnostic mode.
+   */
+  toolGateway?: {
+    mcp?: McpExecutorConfig;
+  };
   /** Optional adapter-silence budget for the Responses watchdog. */
   stallTimeoutSec?: number;
   /** Optional browser transport tuning; defaults apply per field when absent. */
   tuning?: ChatGptWebTuning;
   autoApproveToolCalls: boolean;
   controlToken: string;
+  /**
+   * Bearer/secret-path credential for the plugin's stateless Streamable HTTP MCP endpoint.
+   * Optional for compatibility with configs written before the endpoint existed. When absent,
+   * the endpoint is disabled and the sidecar logs a setup hint.
+   */
+  mcpToken?: string;
   runtimeCommand: string[];
   acknowledgedUnofficialAt?: string;
   tunnel?: TunnelConfig;
@@ -326,6 +340,7 @@ export function defaultConfig(mode: RuntimeMode = "browser-only"): AppConfig {
     zeroRiskProEnabled: false,
     autoApproveToolCalls: false,
     controlToken: randomBytes(32).toString("base64url"),
+    mcpToken: randomBytes(32).toString("base64url"),
     runtimeCommand: currentRuntimeCommand(),
   };
 }
@@ -557,6 +572,10 @@ function parseConfig(value: unknown, path: string): AppConfig {
     throw new Error(`brokerSocketPath must be an absolute Unix socket path in ${path}`);
   }
   if (!/^[A-Za-z0-9_-]{40,}$/.test(parsed.controlToken!)) throw new Error(`Invalid controlToken in ${path}`);
+  if (parsed.mcpToken !== undefined
+    && (typeof parsed.mcpToken !== "string" || !/^[A-Za-z0-9_-]{40,}$/.test(parsed.mcpToken))) {
+    throw new Error(`Invalid mcpToken in ${path}`);
+  }
   const validateTunnel = (tunnel: TunnelConfig | undefined, label: string): void => {
     if (!tunnel || typeof tunnel !== "object") throw new Error(`${label} is missing in ${path}`);
     for (const key of ["binaryPath", "tunnelId", "runtimeKeyFile", "profileDir", "profileName", "alias"] as const) {
@@ -655,6 +674,32 @@ function parseConfig(value: unknown, path: string): AppConfig {
       sandboxPolicy: external.sandboxPolicy,
       ...(external.networkAccess !== undefined ? { networkAccess: external.networkAccess } : {}),
     };
+  }
+  if (parsed.toolGateway !== undefined) {
+    const gateway = parsed.toolGateway;
+    if (!gateway || typeof gateway !== "object" || Array.isArray(gateway)) {
+      throw new Error(`Invalid toolGateway in ${path}`);
+    }
+    const mcp = gateway.mcp;
+    if (mcp !== undefined) {
+      if (!mcp || typeof mcp !== "object" || Array.isArray(mcp)) {
+        throw new Error(`Invalid toolGateway.mcp in ${path}`);
+      }
+      if (mcp.transport !== "stdio" && mcp.transport !== "http") {
+        throw new Error(`toolGateway.mcp.transport must be stdio or http in ${path}`);
+      }
+      if (mcp.transport === "stdio"
+        && (typeof mcp.command !== "string" || mcp.command.trim().length === 0)) {
+        throw new Error(`toolGateway.mcp.command is required for stdio in ${path}`);
+      }
+      if (mcp.transport === "http"
+        && (typeof mcp.url !== "string" || !/^https?:\/\//.test(mcp.url))) {
+        throw new Error(`toolGateway.mcp.url must be an absolute HTTP(S) URL in ${path}`);
+      }
+      if (mcp.namePrefix !== undefined && typeof mcp.namePrefix !== "string") {
+        throw new Error(`toolGateway.mcp.namePrefix must be a string in ${path}`);
+      }
+    }
   }
   const solAvailable = parsed.solAvailable !== false;
   const proAvailable = parsed.proAvailable === true;

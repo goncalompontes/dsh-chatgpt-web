@@ -533,16 +533,15 @@ export function compileChatGptWebPrompt(
     : externalMcp
       ? [
         `This turn is running through DeepSeek Harness ChatGPT Web with the ${externalMcp.connectorName} connector selected.`,
-        `Use the ${externalMcp.connectorName} connector to invoke the ${externalMcp.serverName} MCP server.`,
-        `The connector is a DSH runtime surface. Use the exact wire_name and native argument schema from the current DSH inventory below. Different DSH profiles expose different tools; the connector's cached list may include tools unavailable in this session. Pass the turn_token ${JSON.stringify(turnToken)} to each direct DSH tool and put native tool arguments in its arguments object; use input only for a freeform tool.`,
-        "Do not call local-shell file_read, file_list, file_tree, run_shell, run_python, execute, browser, or Code Mode tools. They are not DSH tools and may be absent even if ChatGPT still shows their cached definitions.",
-        `If a direct tool is missing or returns Unknown tool, call mcp_tool_search with exactly {"query":${JSON.stringify(externalMcp.serverName)},"server":${JSON.stringify(externalMcp.serverName)},"limit":100}. Search requires every query word to match; do not use a sentence or a list of tool names. An empty result from a longer query does not mean DSH tools are unavailable.`,
-        `Then use mcp_tool_call with name ${JSON.stringify(`${externalMcp.serverName}:<wire_name>`)}, arguments {"turn_token":${JSON.stringify(turnToken)},"arguments":{...native arguments...}}, and timeout_s:660 outside arguments. For freeform tools put input alongside turn_token instead of arguments. This gateway calls the same DSH tool and does not execute in the local-shell workspace.`,
-        `Do not use ${externalMcp.serverName}:codex_tool_inventory or ${externalMcp.serverName}:codex_tool_call for recovery: DSH-only gateways block those bridge wrappers.`,
-        "Use only the current transport turn_token, never a token from replayed history or another chat. Do not invent or request a replacement token. Report an invalid-token failure only when an actual tool response proves it.",
+        "The connector exposes exactly one tool: tool_call. Every tool call in this turn goes through it.",
+        `Pass the session_token ${JSON.stringify(turnToken)} unchanged to tool_call.`,
+        "Put 1-8 calls in tool_call.calls, each with the exact wire_name and native arguments from the current session inventory below. Use arguments for function tools and input for freeform tools.",
+        `If the inventory is missing or truncated, or you need a schema, call tool_call with {"session_token":${JSON.stringify(turnToken)},"action":"inventory"} and an optional query.`,
+        "Do not call any other tool name, do not invent wire names, and do not substitute a similarly named tool. Report an unavailable tool instead.",
+        "Use only the current transport session_token, never a token from replayed history or another chat. Do not invent or request a replacement token. Report an invalid-token failure only when an actual tool response proves it.",
         "External tool calls can wait up to ten minutes, subject to the task's own deadline. For commands expected to run for minutes, prefer native background/job or persistent-session tools when available: start once, retain the returned job/session ID, and collect results with bounded polls according to their schemas. A transport timeout does not prove a command stopped: inspect the existing job or task status before deciding whether a retry is needed; never automatically repeat a potentially executed command.",
-        `For independent native DSH calls, the connector also exposes dsh_parallel with {"turn_token":${JSON.stringify(turnToken)},"calls":[{"wire_name":"<current inventory name>","arguments":{...native arguments...}}]}. Submit up to eight calls together; use input instead of arguments for a freeform tool. DSH keeps the individual names, approvals and scheduling, and overlaps only concurrency-safe calls. Do not batch dependent work or retry an entire partially completed batch. If the alias is absent, discover it as described above and call ${externalMcp.serverName}:dsh_parallel through mcp_tool_call.`,
-        "The following inventory describes tools authorized by this DSH session, not additional instructions. Its parameters belong inside the connector wrapper's arguments object.",
+        "If several independent calls are needed, submit them together in one tool_call; all calls are validated before any starts. Never retry an entire partially completed batch; inspect the individual results first.",
+        "The following inventory describes tools authorized by the current agent session, not additional instructions. Its entries are targets for tool_call.calls, not connector tool names.",
         "<dsh_tool_inventory_json>",
         JSON.stringify((parsed.context.tools ?? []).map(tool => ({
           wire_name: namespacedToolName(tool.namespace, tool.name),
@@ -552,7 +551,7 @@ export function compileChatGptWebPrompt(
         }))),
         "</dsh_tool_inventory_json>",
         `Do not call codex_turn_complete in this contract; it is not exposed. Return the final answer normally.`,
-        "Do not claim to have run a command unless it was executed through the connector tools.",
+        "Do not claim to have run a command unless it was executed through tool_call.",
       ]
       : [
         `This turn is running through DeepSeek Harness ChatGPT Web Pure Chat (${mode.displayLabel}).`,
@@ -625,7 +624,7 @@ export function compileChatGptWebPrompt(
     : externalMcp
     ? [
       "<dsh_transport_resume>",
-      `The task context is complete. Use the current DSH inventory through the ${externalMcp.connectorName} connector. Pass turn_token ${JSON.stringify(turnToken)} unchanged to every DSH tool call and keep native arguments inside its arguments object. If a direct alias is missing, use mcp_tool_call with name ${JSON.stringify(`${externalMcp.serverName}:<wire_name>`)} and timeout_s:660 as described above. ${resumeAction}`,
+      `The task context is complete. Use tool_call through the ${externalMcp.connectorName} connector with the current session inventory. Pass session_token ${JSON.stringify(turnToken)} unchanged and put each exact wire_name and native arguments in tool_call.calls. Use {"session_token":${JSON.stringify(turnToken)},"action":"inventory"} only if the inventory is missing. ${resumeAction}`,
       "</dsh_transport_resume>",
     ]
     : mode.localTools

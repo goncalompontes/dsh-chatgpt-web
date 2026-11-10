@@ -40,6 +40,7 @@ Usage:
   dsh-chatgpt-web login
   dsh-chatgpt-web doctor [--json]
   dsh-chatgpt-web serve
+  dsh-chatgpt-web reload [--code] [--timeout MS]
   dsh-chatgpt-web browser check
   dsh-chatgpt-web uninstall --yes
 
@@ -474,6 +475,28 @@ async function openCommand(args: string[]): Promise<void> {
   }
 }
 
+async function reloadCommand(args: string[]): Promise<void> {
+  const code = takeFlag(args, "--code");
+  const timeout = takeOption(args, "--timeout");
+  assertNoArgs(args);
+  const config = loadConfig();
+  const path = code ? "/v1/control/hot-restart" : "/v1/control/reload";
+  const body = code
+    ? JSON.stringify(timeout === undefined ? {} : { drainTimeoutMs: Number(timeout) })
+    : undefined;
+  const response = await fetch(`http://${config.host}:${config.port}${path}`, {
+    method: "POST",
+    headers: {
+      authorization: `Bearer ${config.controlToken}`,
+      ...(body === undefined ? {} : { "content-type": "application/json" }),
+    },
+    ...(body === undefined ? {} : { body }),
+  });
+  const text = await response.text();
+  if (!response.ok) throw new Error(`reload failed (${response.status}): ${text}`);
+  stdout.write(`${text}\n`);
+}
+
 async function uninstallCommand(args: string[]): Promise<void> {
   const yes = takeFlag(args, "--yes");
   const keepData = takeFlag(args, "--keep-data");
@@ -565,6 +588,7 @@ async function main(): Promise<void> {
   }
   else if (command === "tunnel") await tunnelCommand(args);
   else if (command === "open") await openCommand(args);
+  else if (command === "reload") await reloadCommand(args);
   else if (command === "uninstall") await uninstallCommand(args);
   else throw new Error(`Unknown command: ${command}\n\n${HELP}`);
 }

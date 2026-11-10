@@ -2,9 +2,9 @@ import { ChatGptBrowserAdmission } from "./browser-admission";
 import { BrowserCapacityController, type BrowserCapacitySample } from "./browser-capacity";
 
 /**
- * Observes host pressure only while turns are active or queued. All admission
- * decisions remain capped by BrowserCapacityController; existing leases are
- * never preempted. An invalid sample conservatively reduces future admission.
+ * Observes host pressure only while turns are active or queued. Concurrency normally runs at the
+ * user-selected ceiling; real memory/CPU pressure throttles new admissions without preempting
+ * turns already running. An invalid sample is treated as pressure.
  */
 export class BrowserAdmissionCapacityMonitor {
   private timer: ReturnType<typeof setInterval> | undefined;
@@ -31,23 +31,40 @@ export class BrowserAdmissionCapacityMonitor {
       sample = null;
     }
     this.latestSample = sample;
+    const previous = this.admission.snapshot().capacity;
     const capacity = this.controller.update(sample, this.clock());
     this.admission.setCapacity(capacity);
+    if (capacity !== previous) {
+      const pressure = this.controller.pressureState();
+      const mb = (bytes: number | undefined): string => bytes === undefined
+        ? "?"
+        : `${Math.round(bytes / 1024 ** 2)}MiB`;
+      console.info(
+        `[chatgpt-web] browser tab capacity ${previous}->${capacity}`
+        + ` (${pressure.throttled ? `throttled: ${pressure.reason ?? "pressure"}` : "healthy"},`
+        + ` available=${mb(sample?.availableMemoryBytes)},`
+        + ` load=${sample?.loadAverageOneMinute ?? "?"}/${sample?.cpuCount ?? "?"},`
+        + ` active=${sample?.activeTurns ?? "?"})`,
+      );
+    }
     return capacity;
   }
 
   resources(): BrowserCapacitySample | null { return this.latestSample; }
+
+  pressure() {
+    return this.controller.pressureState();
+  }
 
   /** Start observing lazily; a queued request can gain capacity on future samples. */
   start(): void {
     if (this.timer) return;
     this.observe();
     this.timer = setInterval(() => {
+      this.observe();
       if (this.admission.snapshot().active === 0 && this.admission.snapshot().pending === 0) {
         this.stop();
-        return;
       }
-      this.observe();
     }, this.intervalMs);
     this.timer.unref?.();
   }

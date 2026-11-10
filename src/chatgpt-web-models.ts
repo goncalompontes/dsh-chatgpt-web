@@ -81,6 +81,17 @@ export const CHATGPT_WEB_PRO_MODEL_COMPOSER_CHAR_LIMIT = 1_635_000;
  * history out of later browser requests without asking Codex to compact its canonical history.
  */
 export const CHATGPT_WEB_LUNA_CONTEXT_WINDOW = 1_050_000;
+/**
+ * Context window advertised to the harness for every automatic ChatGPT Web route.
+ *
+ * ChatGPT Web owns its conversation and compacts it itself, so the tiny measured browser-message
+ * ceilings are a *transport* boundary, not a model context window. Advertising those ceilings made
+ * the harness eagerly compact and report false `context_length_exceeded` failures even though the
+ * browser conversation still held the history. The bridge now keeps the CHATGPT_WEB_LUNA_CONTEXT_WINDOW
+ * capacity in the catalog and recovers oversized replays by resuming/continuing the browser chat, so
+ * the harness should not decide to compact on the bridge's behalf.
+ */
+export const CHATGPT_WEB_CONTINUATION_CONTEXT_WINDOW = CHATGPT_WEB_LUNA_CONTEXT_WINDOW;
 export const CHATGPT_WEB_BIGGER_CONTEXT_MULTIPLIER = 3;
 /**
  * Measured Free-account composer boundary for the Luna route: a 119,341-character prompt enables
@@ -91,9 +102,14 @@ export const CHATGPT_WEB_BIGGER_CONTEXT_MULTIPLIER = 3;
 export const CHATGPT_WEB_LUNA_COMPOSER_CHAR_LIMIT = 120_000;
 
 export interface ChatGptWebContextLimits {
+  /** Internal browser-submission ceiling. Never advertise this value as a model context window. */
   contextWindow: number;
   effectiveContextWindowPercent: number;
   autoCompactTokenLimit: number;
+  /** Client-facing window. ChatGPT Web continues inside its own conversation instead of failing. */
+  reportedContextWindow: number;
+  /** Client-facing compaction threshold; the browser, not the harness, owns compaction. */
+  reportedAutoCompactTokenLimit: number;
 }
 
 export interface ChatGptWebTransportLimits {
@@ -114,10 +130,13 @@ function contextLimits(
 ): ChatGptWebContextLimits {
   return {
     contextWindow,
-    // Codex reports this effective window in its context indicator. Align it with the practical
-    // pre-compaction budget instead of exposing an unreachable underlying model window.
-    effectiveContextWindowPercent: Math.round((autoCompactTokenLimit / contextWindow) * 100),
+    // Ring the harness at the full advertised capacity. The browser conversation already carries
+    // forward history that an individual browser message never resends, so a low percentage here
+    // only recreates the premature /compact loop this bridge is meant to avoid.
+    effectiveContextWindowPercent: 100,
     autoCompactTokenLimit,
+    reportedContextWindow: CHATGPT_WEB_CONTINUATION_CONTEXT_WINDOW,
+    reportedAutoCompactTokenLimit: CHATGPT_WEB_CONTINUATION_CONTEXT_WINDOW,
   };
 }
 
