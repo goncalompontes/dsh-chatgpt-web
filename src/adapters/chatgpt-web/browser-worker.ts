@@ -1573,6 +1573,37 @@ export async function setChatGptThinkMode(
   await captureDiagnostic?.(enabled ? "think-enabled" : "think-disabled");
 }
 
+/**
+ * Prove that a rehydrated user turn belongs to the prompt we submitted.
+ *
+ * ChatGPT collapses long user messages ("Show more"), so the DOM text is frequently a truncated
+ * prefix of the submitted prompt. Exact equality alone therefore rejects our own turn and fails
+ * an otherwise healthy response. A truncated render is accepted only when the visible text is a
+ * substantial prefix; a competing message with different leading content still fails.
+ */
+export function chatGptPromptIdentityMatches(
+  expected: string,
+  observed: string,
+  options: { truncated?: boolean; commonPrefixChars?: number } = {},
+): boolean {
+  if (!expected || !observed) return false;
+  if (observed === expected) return true;
+  const prefix = options.commonPrefixChars
+    ?? (() => {
+      let count = 0;
+      while (count < Math.min(expected.length, observed.length)
+        && expected[count] === observed[count]) count += 1;
+      return count;
+    })();
+  // The whole visible message is a prefix of the submitted prompt (virtualization or truncation
+  // can make it shorter without changing its beginning).
+  if (prefix >= observed.length) return true;
+  // A collapsed "Show more" render keeps the beginning but may cut mid-block; accept when the
+  // visible prefix is substantial enough to prove identity rather than a different message.
+  return options.truncated === true
+    && prefix >= Math.min(expected.length, observed.length) * 0.25;
+}
+
 export function chatGptNewTurnIdentity(
   initial: readonly string[],
   current: readonly string[],
@@ -3318,6 +3349,11 @@ export class ChatGptBrowserWorker {
           chatGptTurnLocator(page, addedUsers[0]!).evaluate(element => {
             const bubble = element.querySelector('[data-user-message-bubble], [data-message-author-role="user"]') ?? element;
             const clone = bubble.cloneNode(true) as HTMLElement;
+            // A collapsed long prompt has an explicit expander. Record it before removing controls.
+            const truncated = [...bubble.querySelectorAll<HTMLElement>('button, [role="button"]')]
+              .some(node => /^(?:show|read)\s+more$/i.test(
+                (node.getAttribute("aria-label") ?? node.textContent ?? "").replace(/\s+/g, " ").trim(),
+              ));
             clone.querySelectorAll('button, svg, script, style, [app-mention-name], [data-id^="plugin:"][data-keyword]')
               .forEach(node => node.remove());
             // Composer newlines become block elements after hydration. textContent
@@ -3327,10 +3363,10 @@ export class ChatGptBrowserWorker {
               node.prepend("\n");
               node.append("\n");
             });
-            return clone.textContent ?? "";
+            return { text: clone.textContent ?? "", truncated };
           }), signal,
         ));
-        const normalized = normalize(actual);
+        const normalized = normalize(actual.text);
         // The current renderer can leave the connector's textual mention outside its pill.
         const mentions = [`$${this.config.appName} `, `${this.config.appName} `];
         const mention = mentions.find(prefix => normalized.startsWith(prefix));
@@ -3339,8 +3375,23 @@ export class ChatGptBrowserWorker {
         commonPrefixChars = 0;
         while (commonPrefixChars < Math.min(expected.length, observedPrompt.length)
           && expected[commonPrefixChars] === observedPrompt[commonPrefixChars]) commonPrefixChars += 1;
-        submittedPromptMatches = normalized === expected
-          || mentions.some(mention => normalized.startsWith(mention) && normalized.slice(mention.length) === expected);
+        // A rehydrated user turn must still be the newest user turn in the transcript. This keeps
+        // the competing-input guard while allowing our own virtualized/truncated prompt through.
+        const isLatestUserTurn = state.userIdentities.at(-1) === addedUsers[0];
+        submittedPromptMatches = isLatestUserTurn && (
+          normalized === expected
+          || mentions.some(mention => normalized.startsWith(mention) && normalized.slice(mention.length) === expected)
+          || chatGptPromptIdentityMatches(expected, observedPrompt, {
+            truncated: actual.truncated, commonPrefixChars,
+          })
+        );
+        if (!submittedPromptMatches || actual.truncated) {
+          console.info(`[chatgpt-web] assistant_rebind_identity ${JSON.stringify({
+            latestUser: isLatestUserTurn, truncated: actual.truncated,
+            expectedPromptChars: expected.length, observedPromptChars,
+            commonPrefixChars, matched: submittedPromptMatches,
+          })}`);
+        }
       }
       if (!submittedPromptMatches) {
         // Keep identity failures actionable without recording prompt contents or capabilities.
