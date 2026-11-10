@@ -1758,6 +1758,17 @@ export const CHATGPT_STOPPED_THINKING_GRACE_MS = 5_000;
  * re-observes within a consecutive budget; any successful observation resets that budget, and
  * exhausting it fails closed with the original fault as the cause.
  */
+/**
+ * Response snapshot budget. A page evaluate that takes longer than two seconds is not evidence
+ * that the turn failed; with several concurrent tabs and host load it is ordinary contention.
+ * Scale the budget with the number of active turns in this worker, bounded so a genuinely hung
+ * renderer still fails within the turn's stall budget.
+ */
+export function chatGptDomObservationTimeoutMs(activeTurns = 1): number {
+  const turns = Number.isFinite(activeTurns) ? Math.max(1, Math.floor(activeTurns)) : 1;
+  return Math.min(8_000, 2_000 + (turns - 1) * 750);
+}
+
 export const MAX_CHATGPT_INTERNAL_OBSERVATION_FAULTS = 8;
 
 /**
@@ -4635,7 +4646,7 @@ export class ChatGptBrowserWorker {
       completionActionSelector: CHATGPT_COMPLETION_ACTION_SELECTOR,
       knownKey: cache?.key,
       attributeFilter: [...CHATGPT_DOM_REVISION_ATTRIBUTES],
-    }, { timeout: 2_000 }).catch(async error => {
+    }, { timeout: chatGptDomObservationTimeoutMs(this.activeRuns?.size ?? 1) }).catch(async error => {
       if (responseTurn.page().isClosed()) throw chatGptBrowserTabClosedError();
       if (await responseTurn.count() === 0) return undefined;
       // A present root whose evaluation failed is an observation fault, not a vanished answer.
