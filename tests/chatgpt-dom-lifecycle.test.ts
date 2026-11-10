@@ -7,6 +7,8 @@ import { activateChatGptEffortMenu } from "../src/chatgpt-session";
 const executablePath = process.env.CHROME_EXECUTABLE_PATH ?? "/usr/bin/google-chrome-stable";
 const browserTest = existsSync(executablePath) ? test : test.skip;
 
+// Chrome cold-start and cleanup can exceed Bun's 5s unit-test default under CI load.
+// Keep a bounded, browser-specific deadline without changing suite-wide timeouts.
 browserTest("effort activation recovers when picker handlers hydrate after the first activation cycle", async () => {
   const browser = await chromium.launch({ executablePath, headless: true });
   try {
@@ -16,7 +18,10 @@ browserTest("effort activation recovers when picker handlers hydrate after the f
       <script>
         const control = document.getElementById('control');
         let hydrated = false;
-        control.addEventListener('pointerdown', () => { hydrated = true; });
+        control.addEventListener('pointerdown', () => {
+          hydrated = true;
+          control.dataset.hydrated = 'true';
+        });
         control.addEventListener('keydown', event => {
           if (event.key === 'Enter' && hydrated) {
             document.getElementById('picker').hidden = false;
@@ -26,11 +31,12 @@ browserTest("effort activation recovers when picker handlers hydrate after the f
       </script>`);
     const activation = await activateChatGptEffortMenu(page, page.locator('#control'), { settleMs: 50 });
     expect(activation.method).toBe('keyboard');
+    expect(await page.locator('#control').getAttribute('data-hydrated')).toBe('true');
     expect(await activation.menu.isVisible()).toBe(true);
   } finally {
     await browser.close();
   }
-});
+}, 15_000);
 
 browserTest("image-only and labelled canvas answers survive DOM extraction and completion checks", async () => {
   const browser = await chromium.launch({ executablePath, headless: true });
