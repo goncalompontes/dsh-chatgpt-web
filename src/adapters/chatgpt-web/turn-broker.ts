@@ -391,6 +391,7 @@ export class TurnBroker implements TurnBrokerOwner {
 
   async nextToolBatch(token: string, signal?: AbortSignal): Promise<BrokerToolRequest[]> {
     this.prune();
+    if (signal?.aborted) throw new DOMException("tool wait aborted", "AbortError");
     let channel = this.channels.get(token);
     if (!channel) throw new Error("turn token is invalid or expired");
     if (channel.safe?.state === "awaiting_start") {
@@ -400,6 +401,7 @@ export class TurnBroker implements TurnBrokerOwner {
       this.prune();
       channel = this.channels.get(token);
       if (!channel) throw new Error("turn token is invalid or expired");
+      if (signal?.aborted) throw new DOMException("tool wait aborted", "AbortError");
     }
     // This owner-only empty batch tells the adapter to consume the already accepted completion.
     // Public Zero Risk MCP calls remain fail-closed after the turn reaches its terminal state.
@@ -1123,6 +1125,11 @@ export class TurnBroker implements TurnBrokerOwner {
       return { released: true };
     }
     if (request.method === "resolve") return { environment: binding.channel.environment };
+    // An existing binding survives the completion fence until retirement. It is no longer
+    // authorized to enqueue work, even though its owner may still resolve or release it.
+    if (binding.channel.completionCommitted) {
+      throw new Error("Codex turn completion was already committed; this tool invocation can no longer run");
+    }
     this.assertSafeHarnessRunning(binding.channel);
     if (binding.channel.compactionRequested) {
       const result = binding.channel.compactionResult;

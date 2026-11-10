@@ -24,7 +24,7 @@ import type { ProviderAdapter } from "../base";
 import { parseDataUrl } from "../image";
 import { ChatGptSurfaceStaleError, ChatGptWebAdapterError } from "./adapter-error";
 import { sleep } from "./backoff";
-import { assertChatGptWebInputWithinLimits, ChatGptBrowserWorker } from "./browser-worker";
+import { assertChatGptWebInputWithinLimits, ChatGptBrowserWorker, redactChatGptUiDiagnostic } from "./browser-worker";
 import { extractChatGptTurnEnvironment, extractChatGptTurnIdentity, priorChatGptAbortedTurnIds } from "./environment";
 import { CHATGPT_WEB_LUNA_MODEL_ID, resolveChatGptWebCompactionModel, resolveChatGptWebModelMode, type ChatGptWebCapabilities } from "./model";
 import {
@@ -339,7 +339,18 @@ function replayEvents(events: AdapterEvent[], emit: (event: AdapterEvent) => voi
   for (const event of events) emit(event);
 }
 
-function submittedTurnFailure(session: ChatGptTurnSession, error: unknown): Error {
+/**
+ * Short, redacted cause text for a terminal turn failure. The client-facing message previously
+ * hid every non-adapter root cause behind "ChatGPT stopped responding", making distinct bugs
+ * (DOM disappearance, detached rebind, observation timeout) indistinguishable.
+ */
+export function chatGptTurnFailureCause(error: unknown): string {
+  const raw = error instanceof Error ? `${error.name}: ${error.message}` : String(error);
+  const redacted = redactChatGptUiDiagnostic(raw).replace(/\s+/g, " ").trim();
+  return redacted.length > 200 ? `${redacted.slice(0, 197)}...` : redacted;
+}
+
+export function submittedTurnFailure(session: ChatGptTurnSession, error: unknown): Error {
   const normalized = error instanceof Error ? error : new Error(String(error));
   if (normalized instanceof ChatGptWebAdapterError) return normalized;
   if (normalized instanceof ChatGptSurfaceStaleError) {
@@ -357,10 +368,12 @@ function submittedTurnFailure(session: ChatGptTurnSession, error: unknown): Erro
   const phase = session.runtime.submission?.phase;
   if (!phase || phase === "prepared") return normalized;
   const ambiguous = phase === "send_activated";
+  const cause = chatGptTurnFailureCause(normalized);
+  console.error(`[chatgpt-web] submitted turn failed: ${cause}`);
   return new ChatGptWebAdapterError(
     ambiguous
-      ? "ChatGPT did not confirm that the prompt was sent. Check the ChatGPT tab before continuing."
-      : "ChatGPT stopped responding after the task started. Check the ChatGPT tab before continuing.",
+      ? `ChatGPT did not confirm that the prompt was sent. Check the ChatGPT tab before continuing. Cause: ${cause}`
+      : `ChatGPT stopped responding after the task started. Check the ChatGPT tab before continuing. Cause: ${cause}`,
     {
       status: 502,
       errorType: "server_error",

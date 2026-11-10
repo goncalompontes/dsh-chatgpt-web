@@ -1632,6 +1632,37 @@ export async function setChatGptThinkMode(
   await captureDiagnostic?.(enabled ? "think-enabled" : "think-disabled");
 }
 
+/**
+ * Prove that a rehydrated user turn belongs to the prompt we submitted.
+ *
+ * ChatGPT collapses long user messages ("Show more"), so the DOM text is frequently a truncated
+ * prefix of the submitted prompt. Exact equality alone therefore rejects our own turn and fails
+ * an otherwise healthy response. A truncated render is accepted only when the visible text is a
+ * substantial prefix; a competing message with different leading content still fails.
+ */
+export function chatGptPromptIdentityMatches(
+  expected: string,
+  observed: string,
+  options: { truncated?: boolean; commonPrefixChars?: number } = {},
+): boolean {
+  if (!expected || !observed) return false;
+  if (observed === expected) return true;
+  const prefix = options.commonPrefixChars
+    ?? (() => {
+      let count = 0;
+      while (count < Math.min(expected.length, observed.length)
+        && expected[count] === observed[count]) count += 1;
+      return count;
+    })();
+  // The whole visible message is a prefix of the submitted prompt (virtualization or truncation
+  // can make it shorter without changing its beginning).
+  if (prefix >= observed.length) return true;
+  // A collapsed "Show more" render keeps the beginning but may cut mid-block; accept when the
+  // visible prefix is substantial enough to prove identity rather than a different message.
+  return options.truncated === true
+    && prefix >= Math.min(expected.length, observed.length) * 0.25;
+}
+
 export function chatGptNewTurnIdentity(
   initial: readonly string[],
   current: readonly string[],
@@ -1642,6 +1673,22 @@ export function chatGptNewTurnIdentity(
     throw new Error(`ChatGPT exposed ${added.length} new conversation turns for one submitted message`);
   }
   return added[0];
+}
+
+/**
+ * Stable conversation identity from the current URL. Temporary Chat starts as a local
+ * conversation (`/c/local-chatgpt:<uuid>`) and later migrates to a server conversation
+ * (`/c/<uuid>`); a change while a turn is active means the transcript was remounted.
+ */
+export function chatGptConversationIdentity(url: string): string | undefined {
+  try {
+    const parsed = new URL(url);
+    if (parsed.origin !== "https://chatgpt.com") return undefined;
+    const match = parsed.pathname.match(/^\/c\/([^/]+)/);
+    return match?.[1] ? decodeURIComponent(match[1]) : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 export function chatGptReboundTurnIdentity(
@@ -1817,6 +1864,17 @@ export const CHATGPT_STOPPED_THINKING_GRACE_MS = 5_000;
  * re-observes within a consecutive budget; any successful observation resets that budget, and
  * exhausting it fails closed with the original fault as the cause.
  */
+/**
+ * Response snapshot budget. A page evaluate that takes longer than two seconds is not evidence
+ * that the turn failed; with several concurrent tabs and host load it is ordinary contention.
+ * Scale the budget with the number of active turns in this worker, bounded so a genuinely hung
+ * renderer still fails within the turn's stall budget.
+ */
+export function chatGptDomObservationTimeoutMs(activeTurns = 1): number {
+  const turns = Number.isFinite(activeTurns) ? Math.max(1, Math.floor(activeTurns)) : 1;
+  return Math.min(8_000, 2_000 + (turns - 1) * 750);
+}
+
 export const MAX_CHATGPT_INTERNAL_OBSERVATION_FAULTS = 8;
 
 /**
@@ -3421,6 +3479,11 @@ export class ChatGptBrowserWorker {
           chatGptTurnLocator(page, addedUsers[0]!).evaluate(element => {
             const bubble = element.querySelector('[data-user-message-bubble], [data-message-author-role="user"]') ?? element;
             const clone = bubble.cloneNode(true) as HTMLElement;
+            // A collapsed long prompt has an explicit expander. Record it before removing controls.
+            const truncated = [...bubble.querySelectorAll<HTMLElement>('button, [role="button"]')]
+              .some(node => /^(?:show|read)\s+more$/i.test(
+                (node.getAttribute("aria-label") ?? node.textContent ?? "").replace(/\s+/g, " ").trim(),
+              ));
             clone.querySelectorAll('button, svg, script, style, [app-mention-name], [data-id^="plugin:"][data-keyword]')
               .forEach(node => node.remove());
             // Composer newlines become block elements after hydration. textContent
@@ -3430,10 +3493,10 @@ export class ChatGptBrowserWorker {
               node.prepend("\n");
               node.append("\n");
             });
-            return clone.textContent ?? "";
+            return { text: clone.textContent ?? "", truncated };
           }), signal,
         ));
-        const normalized = normalize(actual);
+        const normalized = normalize(actual.text);
         // The current renderer can leave the connector's textual mention outside its pill.
         const mentions = [`$${this.config.appName} `, `${this.config.appName} `];
         const mention = mentions.find(prefix => normalized.startsWith(prefix));
@@ -3442,8 +3505,23 @@ export class ChatGptBrowserWorker {
         commonPrefixChars = 0;
         while (commonPrefixChars < Math.min(expected.length, observedPrompt.length)
           && expected[commonPrefixChars] === observedPrompt[commonPrefixChars]) commonPrefixChars += 1;
-        submittedPromptMatches = normalized === expected
-          || mentions.some(mention => normalized.startsWith(mention) && normalized.slice(mention.length) === expected);
+        // A rehydrated user turn must still be the newest user turn in the transcript. This keeps
+        // the competing-input guard while allowing our own virtualized/truncated prompt through.
+        const isLatestUserTurn = state.userIdentities.at(-1) === addedUsers[0];
+        submittedPromptMatches = isLatestUserTurn && (
+          normalized === expected
+          || mentions.some(mention => normalized.startsWith(mention) && normalized.slice(mention.length) === expected)
+          || chatGptPromptIdentityMatches(expected, observedPrompt, {
+            truncated: actual.truncated, commonPrefixChars,
+          })
+        );
+        if (!submittedPromptMatches || actual.truncated) {
+          console.info(`[chatgpt-web] assistant_rebind_identity ${JSON.stringify({
+            latestUser: isLatestUserTurn, truncated: actual.truncated,
+            expectedPromptChars: expected.length, observedPromptChars,
+            commonPrefixChars, matched: submittedPromptMatches,
+          })}`);
+        }
       }
       if (!submittedPromptMatches) {
         // Keep identity failures actionable without recording prompt contents or capabilities.
@@ -4797,7 +4875,7 @@ export class ChatGptBrowserWorker {
       completionActionSelector: CHATGPT_COMPLETION_ACTION_SELECTOR,
       knownKey: cache?.key,
       attributeFilter: [...CHATGPT_DOM_REVISION_ATTRIBUTES],
-    }, { timeout: 2_000 }).catch(async error => {
+    }, { timeout: chatGptDomObservationTimeoutMs(this.activeRuns?.size ?? 1) }).catch(async error => {
       if (responseTurn.page().isClosed()) throw chatGptBrowserTabClosedError();
       if (await responseTurn.count() === 0) return undefined;
       // A present root whose evaluation failed is an observation fault, not a vanished answer.
@@ -5503,10 +5581,12 @@ export class ChatGptBrowserWorker {
 
       let lastHeartbeat = 0;
       let finalText = "";
+      let emittedTextChars = 0;
       let sawRunning = false;
       let loggedCompletionWait = false;
       let capturedResponse = false;
       const sentAt = Date.now();
+      let conversationIdentity = chatGptConversationIdentity(page.url());
       const visibleTrace = new ChatGptVisibleTraceTracker();
       const markdownBuffer = new ChatGptMarkdownBuffer();
       const checkpointStream = turn.captureLunaCheckpoint
@@ -5514,14 +5594,17 @@ export class ChatGptBrowserWorker {
         : undefined;
       const emitMarkdownDelta = (delta: string): void => {
         const visible = checkpointStream ? checkpointStream.push(delta) : delta;
-        if (visible) turn.onTextDelta(visible);
+        if (visible) {
+          emittedTextChars += visible.length;
+          turn.onTextDelta(visible);
+        }
       };
       const throwMarkdownConsistencyError = (error: unknown): { markdown: string; delta: string } => {
         if (!(error instanceof ChatGptMarkdownConsistencyError)) throw error;
         console.warn(`[chatgpt-web] consistency warning handled gracefully: ${error.message}`);
         return { markdown: "", delta: "" };
       };
-      const domHealthTracker = new ChatGptTurnDomHealthTracker();
+      let domHealthTracker = new ChatGptTurnDomHealthTracker();
       const stoppedThinkingTracker = new ChatGptStoppedThinkingTracker();
       const responseDomCache: ChatGptResponseDomCache = {};
       let toolConfirmationGraceUntil = 0;
@@ -5773,6 +5856,46 @@ export class ChatGptBrowserWorker {
             completionActionVisible: false,
             externalProgressLive,
           });
+          const currentConversation = chatGptConversationIdentity(page.url());
+          if (domError
+            && emittedTextChars === 0
+            && currentConversation !== undefined
+            && currentConversation !== conversationIdentity) {
+            // Temporary Chat can migrate from a local conversation to a server conversation and
+            // remount the transcript. No text was delivered yet, so bind to the newest assistant
+            // turn in the new conversation and keep observing instead of failing the turn.
+            const state = await this.submissionDomState(page, {}, turn.abortSignal);
+            const latestAssistant = state.responseIdentities.at(-1);
+            console.warn(
+              `[chatgpt-web] browser turn ${turn.traceId} recovered a conversation remount`
+              + ` (${conversationIdentity ?? "unknown"} -> ${currentConversation},`
+              + ` assistantTurns=${state.assistantTurnCount})`,
+            );
+            conversationIdentity = currentConversation;
+            domHealthTracker = new ChatGptTurnDomHealthTracker();
+            responseDomCache.key = undefined;
+            responseDomCache.snapshot = undefined;
+            submissionBaseline = {
+              ...submissionBaseline,
+              userTurns: page.locator(CHATGPT_USER_TURN_SELECTOR),
+              responseTurns: page.locator(CHATGPT_ASSISTANT_TURN_SELECTOR),
+              initialUserTurnCount: state.userTurnCount,
+              initialResponseTurnCount: latestAssistant ? Math.max(0, state.assistantTurnCount - 1) : state.assistantTurnCount,
+              initialUserTurnIdentities: state.userIdentities,
+              initialResponseTurnIdentities: latestAssistant
+                ? state.responseIdentities.slice(0, -1)
+                : state.responseIdentities,
+              domCache: {},
+            };
+            if (latestAssistant) {
+              responseTurn = {
+                identity: latestAssistant,
+                locator: chatGptTurnLocator(page, latestAssistant),
+                acceptedUserTurnIdentities: state.userIdentities,
+              };
+            }
+            continue;
+          }
           if (domError) throw new Error(domError);
         }
         await new Promise(resolveSleep => setTimeout(resolveSleep, 250));
