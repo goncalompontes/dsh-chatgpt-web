@@ -84,6 +84,7 @@ import {
 } from "../../chatgpt-web-models";
 import { LauncherBrowserHelperClient } from "./launcher-helper-client";
 import { MAX_CHATGPT_BROWSER_TABS } from "./concurrency";
+import { chatGptWebBackoffDelayMs, chatGptWebRetryAfterMs, sleep } from "./backoff";
 import {
   ChatGptSurfaceStaleError,
   ChatGptWebAdapterError,
@@ -820,6 +821,29 @@ const chatGptExpiredSessionAlert = (page: Page): Locator => page
   .filter({ hasText: /Your session has expired|你的工作階段已過期|您的工作階段已過期|你的会话已过期|您的会话已过期/i })
   .last();
 
+/** ChatGPT redirected the browser profile to its login route: the saved session is gone. */
+export function isChatGptLoginRedirectUrl(url: string): boolean {
+  try {
+    const parsed = new URL(url);
+    return parsed.origin === "https://chatgpt.com"
+      && /^\/auth\/(?:login|signin|sign-in)\/?$/i.test(parsed.pathname);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Fail fast on the login redirect instead of waiting out the composer timeout and then claiming
+ * the service is overloaded. An expired login needs a human sign-in; it is not retryable.
+ */
+export function throwIfChatGptLoginRedirect(page: Pick<Page, "url">): void {
+  if (!isChatGptLoginRedirectUrl(page.url())) return;
+  throw new ChatGptWebAdapterError(
+    "ChatGPT login is expired or signed out. Sign in to your account using the plugin's login command, then retry.",
+    { status: 401, errorType: "authentication_error", code: "chatgpt_session_expired", retryable: false },
+  );
+}
+
 export async function throwIfChatGptSessionFailureAlert(page: Page): Promise<void> {
   if (await chatGptExpiredSessionAlert(page).isVisible().catch(() => false)) {
     throw new ChatGptWebAdapterError(
@@ -1089,7 +1113,7 @@ export function assertChatGptWebInputWithinLimits(
     && estimatedInputTokens > CHATGPT_LUNA_BROWSER_INPUT_TOKEN_BUDGET
   ) {
     throw new ChatGptWebAdapterError(
-      `This Luna turn requires ${estimatedInputTokens.toLocaleString("en-US")} estimated input tokens, which exceeds the measured ${CHATGPT_LUNA_BROWSER_INPUT_TOKEN_BUDGET.toLocaleString("en-US")}-token ChatGPT Free browser transport budget. Completed Luna history is already replaced by its rolling checkpoint; the remaining payload is the current Codex turn and cannot be reduced by /compact.`,
+      `This Luna turn requires ${estimatedInputTokens.toLocaleString("en-US")} estimated input tokens, which exceeds the measured ${CHATGPT_LUNA_BROWSER_INPUT_TOKEN_BUDGET.toLocaleString("en-US")}-token ChatGPT Free browser transport budget. Completed Luna history is already replaced by its rolling checkpoint, so the remaining payload is this turn's own content; reduce a single oversized tool result, attachment, or instruction.`,
       { status: 400, errorType: "invalid_request_error", code: "context_length_exceeded", retryable: false },
     );
   }
@@ -1108,19 +1132,19 @@ export function assertChatGptWebInputWithinLimits(
     && promptChars > effectiveComposerCharLimit
   ) {
     throw new ChatGptWebAdapterError(
-      `This prompt contains ${promptChars.toLocaleString("en-US")} inline characters, which exceeds the ${effectiveComposerCharLimit.toLocaleString("en-US")}-character ChatGPT composer boundary for this account and effort. Run /compact, then retry this Web model.`,
+      `This prompt contains ${promptChars.toLocaleString("en-US")} inline characters, which exceeds the ${effectiveComposerCharLimit.toLocaleString("en-US")}-character ChatGPT composer boundary for this account and effort. The bridge keeps older conversation history in the retained chat; this turn's own payload must fit one composer message.`,
       { status: 400, errorType: "invalid_request_error", code: "context_length_exceeded", retryable: false },
     );
   }
   if (browserMessageTokenLimit !== undefined && estimatedMessageTokens > browserMessageTokenLimit) {
     throw new ChatGptWebAdapterError(
-      `This prompt requires ${estimatedMessageTokens.toLocaleString("en-US")} visible message tokens, which exceeds the measured ${browserMessageTokenLimit.toLocaleString("en-US")}-token ChatGPT browser message boundary for this account and effort. The model context window is ${contextWindow.toLocaleString("en-US")} tokens; run /compact to reduce the next browser message without changing that model window.`,
+      `This prompt requires ${estimatedMessageTokens.toLocaleString("en-US")} visible message tokens, which exceeds the measured ${browserMessageTokenLimit.toLocaleString("en-US")}-token ChatGPT browser message boundary for this account and effort. The bridge keeps older conversation history in the retained chat, so only this turn's own payload must fit one browser message.`,
       { status: 400, errorType: "invalid_request_error", code: "context_length_exceeded", retryable: false },
     );
   }
   if (estimatedInputTokens < contextWindow) return;
   throw new ChatGptWebAdapterError(
-    `This task is estimated at ${estimatedInputTokens.toLocaleString("en-US")} input tokens, which exceeds the ${contextWindow.toLocaleString("en-US")}-token context window for this ChatGPT Web model. Switch to a model with a larger context window, run /compact, then retry this Web model.`,
+    `This turn is estimated at ${estimatedInputTokens.toLocaleString("en-US")} input tokens, which exceeds the ${contextWindow.toLocaleString("en-US")}-token browser transport window for one ChatGPT Web message. Older history stays in the retained chat; reduce this turn's own oversized tool result or attachment.`,
     { status: 400, errorType: "invalid_request_error", code: "context_length_exceeded", retryable: false },
   );
 }
@@ -1169,13 +1193,13 @@ export function assertChatGptWebMultipartInputWithinLimits(
     );
     if (browserComposerCharLimit !== undefined && messageChars > browserComposerCharLimit) {
       throw new ChatGptWebAdapterError(
-        `A Bigger Context ${label} contains ${messageChars.toLocaleString("en-US")} characters, which exceeds the measured ${browserComposerCharLimit.toLocaleString("en-US")}-character ChatGPT composer boundary. The bridge will not split an individual Codex message or JSON record; compact the task before retrying.`,
+        `A Bigger Context ${label} contains ${messageChars.toLocaleString("en-US")} characters, which exceeds the measured ${browserComposerCharLimit.toLocaleString("en-US")}-character ChatGPT composer boundary. The bridge will not split an individual Codex message or JSON record; reduce that record before retrying.`,
         { status: 400, errorType: "invalid_request_error", code: "context_length_exceeded", retryable: false },
       );
     }
     if (browserMessageTokenLimit !== undefined && messageTokens > browserMessageTokenLimit) {
       throw new ChatGptWebAdapterError(
-        `A Bigger Context ${label} requires ${messageTokens.toLocaleString("en-US")} visible message tokens, which exceeds the measured ${browserMessageTokenLimit.toLocaleString("en-US")}-token ChatGPT message boundary. The bridge will not split an individual Codex message or JSON record; compact the task before retrying.`,
+        `A Bigger Context ${label} requires ${messageTokens.toLocaleString("en-US")} visible message tokens, which exceeds the measured ${browserMessageTokenLimit.toLocaleString("en-US")}-token ChatGPT message boundary. The bridge will not split an individual Codex message or JSON record; reduce that record before retrying.`,
         { status: 400, errorType: "invalid_request_error", code: "context_length_exceeded", retryable: false },
       );
     }
@@ -1200,7 +1224,7 @@ export function assertChatGptWebMultipartInputWithinLimits(
   if (estimatedInputTokens < experimentalContextWindow) return;
   const partLabel = partCount === 2 ? "two-part" : "three-part";
   throw new ChatGptWebAdapterError(
-    `This Bigger Context transaction is estimated at ${estimatedInputTokens.toLocaleString("en-US")} input tokens, which exceeds its experimental ${experimentalContextWindow.toLocaleString("en-US")}-token ${partLabel} ceiling. Run /compact, then retry.`,
+    `This Bigger Context transaction is estimated at ${estimatedInputTokens.toLocaleString("en-US")} input tokens, which exceeds its experimental ${experimentalContextWindow.toLocaleString("en-US")}-token ${partLabel} ceiling. Reduce this turn's payload before retrying.`,
     { status: 400, errorType: "invalid_request_error", code: "context_length_exceeded", retryable: false },
   );
 }
@@ -1258,6 +1282,41 @@ export const browserStageTimeouts = {
   // earlier parts. This budget covers ChatGPT accepting the submission, not just the click.
   multipartStageSend: 180_000,
 } as const;
+
+/** Bounded preparation attempts; each retry waits with exponential backoff before reloading. */
+export const CHATGPT_TEMPORARY_CHAT_PREPARATION_ATTEMPTS = 3;
+/** Bounded retries for a pre-submission ChatGPT limit (HTTP 429 / rate-limit dialog). */
+export const CHATGPT_WEB_LIMIT_RETRY_ATTEMPTS = 3;
+
+function isChatGptLimitError(error: unknown): error is ChatGptWebAdapterError {
+  return error instanceof ChatGptWebAdapterError
+    && (error.status === 429 || error.code === "rate_limit_exceeded");
+}
+
+/**
+ * Retry a pre-submission stage that ChatGPT rate-limited. Runs only before a prompt is sent, so
+ * repeating it cannot submit one prompt twice. The delay honors an upstream "try again in Ns"
+ * hint and otherwise grows exponentially with jitter.
+ */
+async function withChatGptLimitBackoff<T>(
+  label: string,
+  action: () => Promise<T>,
+): Promise<T> {
+  for (let attempt = 1; ; attempt++) {
+    try {
+      return await action();
+    } catch (error) {
+      if (!isChatGptLimitError(error) || attempt >= CHATGPT_WEB_LIMIT_RETRY_ATTEMPTS) throw error;
+      const delayMs = chatGptWebRetryAfterMs(error.message)
+        ?? chatGptWebBackoffDelayMs(attempt);
+      console.warn(
+        `[chatgpt-web] ${label} hit a ChatGPT rate limit; retrying in ${delayMs}ms`
+        + ` (attempt ${attempt}/${CHATGPT_WEB_LIMIT_RETRY_ATTEMPTS})`,
+      );
+      await sleep(delayMs);
+    }
+  }
+}
 
 /**
  * Detects that this process was suspended (system sleep) by watching for gaps in a steady tick.
@@ -2043,7 +2102,11 @@ class ChatGptBrowserDiagnostics {
             composer: {
               visibleCount: composers.length,
               textChars: composers.map(element => (element.textContent ?? "").length),
-              selectedConnectors: rows('[data-id^="plugin:"][data-keyword]', 20),
+              selectedConnectors: [
+                ...rows('[data-id^="plugin:"][data-keyword]', 20),
+                ...rows('[app-mention-name]', 20),
+                ...rows('[data-inline-selection-pill-cursor-target]', 20),
+              ].slice(0, 20),
             },
             effortControls: rows(effortControlSelector, 10),
             effortItems: rows(effortItemSelector, 20),
@@ -2799,6 +2862,7 @@ export class ChatGptBrowserWorker {
     let count = 0;
     while (Date.now() < deadline) {
       throwIfPromptAttachmentAborted(abortSignal);
+      throwIfChatGptLoginRedirect(page);
       count = await withBrowserTurnAbort(
         withChatGptBrowserObservationTimeout(
           composers.count(),
@@ -2834,21 +2898,60 @@ export class ChatGptBrowserWorker {
       });
       await captureDiagnostic?.("temporary-chat-navigation-complete");
     }
-    let composer: Locator;
-    try {
-      composer = await this.activeComposer(page);
-    } catch {
-      throw new Error("ChatGPT web login is expired or the Temporary Chat surface is unavailable");
+    throwIfChatGptLoginRedirect(page);
+
+    // Free-plan Temporary Chat bootstrap occasionally lands on a half-hydrated document or is
+    // rate-limited while the profile loads. Both are transient and safe to retry before any
+    // prompt is submitted: reload, wait with exponential backoff, and verify again. A real lost
+    // login fails fast above instead of burning retries.
+    let lastError: unknown;
+    for (let attempt = 1; attempt <= CHATGPT_TEMPORARY_CHAT_PREPARATION_ATTEMPTS; attempt++) {
+      const checkpointSuffix = attempt === 1 ? "" : `-retry-${attempt}`;
+      try {
+        const composer = await this.activeComposer(page);
+        if (await dismissChatGptTemporaryChatOnboarding(page)) {
+          await captureDiagnostic?.(`temporary-chat-onboarding-dismissed${checkpointSuffix}`);
+        }
+        await captureDiagnostic?.(`composer-ready${checkpointSuffix}`);
+        await throwIfChatGptSessionFailureAlert(page);
+        await assertAuthenticatedChatGptPage(page);
+        await assertTemporaryChatPage(page);
+        await captureDiagnostic?.(`session-verified${checkpointSuffix}`);
+        return composer;
+      } catch (error) {
+        // Hydration can complete the redirect to /auth/login after the initial check.
+        throwIfChatGptLoginRedirect(page);
+        lastError = error;
+        // A deterministic adapter verdict (lost login, expired session) is final.
+        if (error instanceof ChatGptWebAdapterError && !error.retryable) throw error;
+        if (attempt >= CHATGPT_TEMPORARY_CHAT_PREPARATION_ATTEMPTS) break;
+        const retryAfterMs = error instanceof Error
+          ? chatGptWebRetryAfterMs(error.message)
+          : undefined;
+        const delayMs = retryAfterMs ?? chatGptWebBackoffDelayMs(attempt);
+        console.warn(
+          `[chatgpt-web] Temporary Chat preparation attempt ${attempt}/${CHATGPT_TEMPORARY_CHAT_PREPARATION_ATTEMPTS} failed;`
+          + ` retrying in ${delayMs}ms: ${error instanceof Error ? error.message : String(error)}`,
+        );
+        await captureDiagnostic?.(`temporary-chat-preparation-retry-${attempt}`);
+        // Start every retry from a fresh document; a stale SPA never finishes bootstrapping.
+        await page.reload({ waitUntil: "domcontentloaded", timeout: 60_000 }).catch(() => {});
+        await sleep(delayMs);
+      }
     }
-    if (await dismissChatGptTemporaryChatOnboarding(page)) {
-      await captureDiagnostic?.("temporary-chat-onboarding-dismissed");
-    }
-    await captureDiagnostic?.("composer-ready");
-    await throwIfChatGptSessionFailureAlert(page);
-    await assertAuthenticatedChatGptPage(page);
-    await assertTemporaryChatPage(page);
-    await captureDiagnostic?.("session-verified");
-    return composer;
+    throwIfChatGptLoginRedirect(page);
+    if (lastError instanceof ChatGptWebAdapterError) throw lastError;
+    throw new ChatGptWebAdapterError(
+      `ChatGPT Temporary Chat did not become ready after ${CHATGPT_TEMPORARY_CHAT_PREPARATION_ATTEMPTS} attempts.`
+      + ` ${lastError instanceof Error ? lastError.message : String(lastError)}`,
+      {
+        status: 503,
+        errorType: "server_error",
+        code: "chatgpt_surface_unavailable",
+        retryable: true,
+        cause: lastError,
+      },
+    );
   }
 
   private async waitForTurnDomMutation(page: Page, timeoutMs = 50): Promise<void> {
@@ -3414,7 +3517,7 @@ export class ChatGptBrowserWorker {
     return composer.locator(`[app-mention-name=${JSON.stringify(this.config.appName)}]`);
   }
 
-  private async connectorIsSelected(composer: Locator, abortSignal?: AbortSignal): Promise<boolean> {
+  private async connectorIsSelected(page: Page, composer: Locator, abortSignal?: AbortSignal): Promise<boolean> {
     const inlineMention = this.connectorInlineMention(composer);
     const inlineCount = await withBrowserTurnAbort(
       withChatGptBrowserObservationTimeout(inlineMention.count()),
@@ -3436,7 +3539,65 @@ export class ChatGptBrowserWorker {
     if (exactMatches > 1) {
       throw new Error(`ChatGPT composer exposed duplicate ${JSON.stringify(this.config.appName)} connector selections`);
     }
-    return exactMatches === 1;
+    if (exactMatches === 1) return true;
+
+    // Current ChatGPT builds render an attached connector as a selection pill with
+    // data-inline-selection-pill-cursor-target, rather than the older plugin data
+    // attributes or app-mention-name marker. The pill's text is the connector label.
+    const editorText = await withBrowserTurnAbort(
+      withChatGptBrowserObservationTimeout(composer.evaluate(element => (
+        (element.textContent ?? "").replace(/[\u200b\ufeff]/g, "").trim()
+      ))),
+      abortSignal,
+    );
+    if (editorText === this.config.appName) return true;
+
+    // ChatGPT currently renders the visible label in a sibling pill beside the
+    // contenteditable node, so search the composer and its nearest wrapper rather
+    // than requiring the pill to be a descendant of the editor itself.
+    const pillLabels = await withBrowserTurnAbort(
+      withChatGptBrowserObservationTimeout(composer.evaluate(element => {
+        const labels: string[] = [];
+        let root: Element | null = element;
+        for (let depth = 0; root && depth < 4; depth += 1, root = root.parentElement) {
+          const selector = '[data-inline-selection-pill-cursor-target], [app-mention-name], [data-id^="plugin:"][data-keyword]';
+          const pills = [...root.querySelectorAll(selector)];
+          if (root.matches(selector)) pills.unshift(root);
+          labels.push(...pills.flatMap(pill => {
+            const text = (pill.textContent ?? "").replace(/[\u200b\ufeff]/g, "").trim();
+            return [text, pill.getAttribute("app-mention-name"), pill.getAttribute("data-keyword")]
+              .filter((label): label is string => typeof label === "string" && label.length > 0);
+          }));
+        }
+        return [...new Set(labels)];
+      })),
+      abortSignal,
+    );
+    const exactPills = pillLabels.filter(label => label === this.config.appName).length;
+    if (exactPills > 1) {
+      throw new Error(`ChatGPT composer exposed duplicate ${JSON.stringify(this.config.appName)} selection pills`);
+    }
+    if (exactPills === 1) return true;
+
+    // Some ChatGPT builds mount the selected pill next to, rather than inside,
+    // the contenteditable subtree. Scope this fallback to rendered connector
+    // markers on the current page; menu rows alone do not use these selectors.
+    const pagePills = page.locator(
+      '[data-inline-selection-pill-cursor-target], [app-mention-name], [data-id^="plugin:"][data-keyword]',
+    ).filter({ visible: true });
+    const pageLabels = await withBrowserTurnAbort(
+      withChatGptBrowserObservationTimeout(pagePills.evaluateAll(elements => elements.flatMap(element => (
+        [element.textContent, element.getAttribute("app-mention-name"), element.getAttribute("data-keyword")]
+          .filter((label): label is string => typeof label === "string")
+          .map(label => label.replace(/[\u200b\ufeff]/g, "").trim())
+      )))),
+      abortSignal,
+    );
+    const exactPagePills = pageLabels.filter(label => label === this.config.appName).length;
+    if (exactPagePills > 1) {
+      throw new Error(`ChatGPT page exposed duplicate ${JSON.stringify(this.config.appName)} connector selections`);
+    }
+    return exactPagePills === 1;
   }
 
   private async connectorMentionRowTitles(
@@ -3500,7 +3661,7 @@ export class ChatGptBrowserWorker {
         undefined,
         { timeout: remainingMs, signal },
       );
-      const connectorSelected = await this.connectorIsSelected(settledComposer, signal);
+      const connectorSelected = await this.connectorIsSelected(page, settledComposer, signal);
       if (remainingText.length > 0 || connectorSelected) {
         throw new Error(
           `ChatGPT connector cleanup did not produce an empty composer`
@@ -3559,10 +3720,11 @@ export class ChatGptBrowserWorker {
         Math.max(1, Math.min(5_000, deadline - Date.now())),
         abortSignal,
       );
-      if (await this.connectorIsSelected(composer, abortSignal)) return composer;
+      if (await this.connectorIsSelected(page, composer, abortSignal)) return composer;
       await new Promise(resolveSleep => setTimeout(resolveSleep, 100));
     }
-    return undefined;
+    throw new Error(`ChatGPT exposed and clicked the ${JSON.stringify(this.config.appName)} connector,`
+      + " but its composer did not register the connector selection");
   }
 
   private async selectConnector(
@@ -3651,7 +3813,7 @@ export class ChatGptBrowserWorker {
     try {
       composer = await this.activeComposer(page, 30_000, abortSignal);
       await composer.fill("", { signal: abortSignal, timeout: CHATGPT_CONNECTOR_ACTION_TIMEOUT_MS });
-      if (await this.connectorIsSelected(composer, abortSignal)) {
+      if (await this.connectorIsSelected(page, composer, abortSignal)) {
         await capture("connector-already-selected");
         return composer;
       }
@@ -3762,7 +3924,7 @@ export class ChatGptBrowserWorker {
         timeout: CHATGPT_CONNECTOR_ACTION_TIMEOUT_MS,
         signal: abortSignal,
       });
-      if (!await this.connectorIsSelected(selectedComposer, abortSignal)) {
+      if (!await this.connectorIsSelected(page, selectedComposer, abortSignal)) {
         throw new Error(`ChatGPT composer did not select ${JSON.stringify(this.config.appName)} connector`);
       }
       await capture("connector-selected");
@@ -5068,14 +5230,16 @@ export class ChatGptBrowserWorker {
         requestedMode.effort,
         stagingMode.effort,
       )) {
-        mode = await this.runStage(turn.traceId, "effort_selection", browserStageTimeouts.effortSelection, () => (
-          this.selectModelAndEffort(
-            page,
-            turn.modelId,
-            stagingMode.effort,
-            browserCapabilities,
-            checkpoint => diagnostics.capture(page, checkpoint),
-          )
+        mode = await withChatGptLimitBackoff("effort_selection", () => (
+          this.runStage(turn.traceId, "effort_selection", browserStageTimeouts.effortSelection, () => (
+            this.selectModelAndEffort(
+              page,
+              turn.modelId,
+              stagingMode.effort,
+              browserCapabilities,
+              checkpoint => diagnostics.capture(page, checkpoint),
+            )
+          ))
         ));
       }
       await diagnostics.capture(page, "effort-selection-complete");

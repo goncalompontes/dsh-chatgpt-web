@@ -73,6 +73,27 @@ export function isClientClosedMessage(text: string): boolean {
   );
 }
 
+/**
+ * The saved ChatGPT Web login is gone. This must win over generic "unavailable" wording:
+ * "ChatGPT web login is expired or the Temporary Chat surface is unavailable" is a credential
+ * state, not upstream overload, and must never be reported as "server is overloaded".
+ */
+export function isChatGptSignedOutMessage(text: string): boolean {
+  const lower = text.toLowerCase();
+  return (
+    lower.includes("login is expired") ||
+    lower.includes("login has expired") ||
+    lower.includes("login expired") ||
+    lower.includes("session has expired") ||
+    lower.includes("session expired") ||
+    lower.includes("signed out") ||
+    lower.includes("sign in again") ||
+    lower.includes("sign in to your account") ||
+    lower.includes("/auth/login") ||
+    lower.includes("log in or sign up")
+  );
+}
+
 export function classifyError(status: number, type: string, message: string): CodexErrorPayload {
   const text = message.toLowerCase();
   // Preserve explicit cancel types; unify message-inferred client closes onto
@@ -105,6 +126,10 @@ export function classifyError(status: number, type: string, message: string): Co
     text.includes("daily quota exceeded")
   ) {
     return { message, type: "insufficient_quota", code: "insufficient_quota" };
+  }
+  // A lost ChatGPT Web login is authoritative even when the message also says "unavailable".
+  if (isChatGptSignedOutMessage(text)) {
+    return { message, type: "authentication_error", code: "chatgpt_session_expired" };
   }
   if (
     status === 429 ||
@@ -193,6 +218,9 @@ export function inferHttpStatusFromAdapterMessage(message: string): number {
   const lower = message.toLowerCase();
   // Client aborts must not look like upstream 502s in /api/logs.
   if (isClientClosedMessage(lower)) return 499;
+  // Check the signed-out state before the generic "unavailable" heuristics: login failures are
+  // actionable credential errors, not overload.
+  if (isChatGptSignedOutMessage(lower)) return 401;
   if (
     lower.includes("resource_exhausted") ||
     lower.includes("resource exhausted") ||

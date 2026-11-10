@@ -1,14 +1,17 @@
 import { createHash, randomBytes } from "node:crypto";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import * as z from "zod/v4";
 import { namespacedToolName, type CodexTool } from "../../types";
 import { VERSION } from "../../version";
+import { auditToolBatch } from "../../audit";
 import type { ChatGptTurnEnvironment } from "./environment";
 import { CODEX_COMPACTION_CONTROL_WIRE_NAME } from "./native-compaction-control";
 import { callTurnBroker, TurnBrokerTimeoutError, type BrokerToolResult } from "./turn-broker";
+import type { ToolExecutor } from "../../tool-gateway/mcp-executor";
 
 interface ClaimedTurn {
   bindingId: string;
@@ -34,61 +37,9 @@ const GATEWAY_AGENT_WAIT_TOOL_NAMES = new Set([
   "multi_agent_v2__wait_agent",
 ]);
 
-// DSH's core tool names are stable across the standard/minimal/cordis presets, while optional
-// bundles add a few more (goal, persistent terminals, PTC, etc.). Expose these as first-class MCP
-// tools so an external connector does not have to route every call through codex_tool_call. The
-// wrapper still carries the turn token and forwards to the exact tool registered by the live DSH
-// agent; a name that is not present in a particular profile returns an explicit availability error.
-const DIRECT_DSH_TOOL_NAMES = [
-  "bash",
-  "read",
-  "write",
-  "edit",
-  "apply_patch",
-  "read_image",
-  "glob",
-  "grep",
-  "terminal_open",
-  "terminal_list",
-  "terminal_read",
-  "terminal_send",
-  "terminal_close",
-  "terminal_signal",
-  "goal",
-  "create_goal",
-  "get_goal",
-  "update_goal",
-  "run_code",
-  "ralph",
-  "skill",
-  "str_replace_editor",
-  "load_workspace_dependencies",
-  "cordis_inspect_list",
-  "cordis_inspect_query",
-  "pwsh",
-  "todo_write",
-  "ask_user_question",
-  "list_subagent_models",
-  "interrupt_agent",
-  "list_agents",
-  "send_message",
-  "schedule_create",
-  "schedule_edit",
-  "schedule_list",
-  "schedule_view",
-  "job_kill",
-  "job_list",
-  "job_output",
-  "web_search",
-  "web_fetch",
-  "present",
-  "working_directory",
-  "session_search",
-  "session_trace",
-  "session_event_read",
-  "session_event_search",
-  "session_event_trace",
-] as const;
+// The connector exposes one stable tool, tool_call. Every native tool and every mounted MCP
+// tool is reached by wire_name from the session inventory; the connector's tools/list never changes.
+const TOOL_CALL_TOOL_NAME = "tool_call";
 
 const turnTokenSchema = z.string().min(20).max(256);
 const jsonArgumentsSchema = z.record(z.string(), z.unknown()).default({});
@@ -191,6 +142,34 @@ function safeVisibleTools(environment: ChatGptTurnEnvironment, contract: ChatGpt
     && (tool.namespace !== undefined || tool.name !== "exec")
     && (!tool.namespace || !bridgeNamespaces.has(tool.namespace))
   ));
+}
+
+/** Tools the native tool_call surface may dispatch. Bridge/control tools are never targets. */
+function visibleSessionTools(environment: ChatGptTurnEnvironment): CodexTool[] {
+  return environment.tools.filter(tool => (
+    wireName(tool) !== CODEX_COMPACTION_CONTROL_WIRE_NAME
+    && tool.name !== TOOL_CALL_TOOL_NAME
+    && !BRIDGE_TOOL_NAMES.has(tool.name)
+  ));
+}
+
+function toolKind(tool: CodexTool): "freeform" | "tool_search" | "function" {
+  return tool.freeform ? "freeform" : tool.toolSearch ? "tool_search" : "function";
+}
+
+/** Small deterministic hint list for a mistyped wire name. */
+function suggestWireNames(tools: CodexTool[], missing: string): string[] {
+  const needle = missing.toLowerCase();
+  const prefix = needle.slice(0, Math.min(4, needle.length));
+  return tools
+    .map(wireName)
+    .filter(name => {
+      const lower = name.toLowerCase();
+      return lower.includes(needle)
+        || needle.includes(lower)
+        || (prefix.length > 0 && lower.includes(prefix));
+    })
+    .slice(0, 5);
 }
 
 function isAgentWaitTool(tool: CodexTool): boolean {
@@ -499,14 +478,15 @@ function execCommandGatewayProgram(
   ]);
 }
 
-export async function runChatGptMcpServer(options: {
+export function createChatGptMcpServer(options: {
   brokerSocketPath: string;
   contract?: ChatGptMcpContract;
-  transport?: Transport;
-}): Promise<McpServer> {
+  /** Optional direct executor. Defaults to the broker (a native harness adapter). */
+  executor?: ToolExecutor;
+}): McpServer {
   const contract = options.contract ?? "native";
   const server = new McpServer(
-    { name: contract === "safe" ? "codex-safe" : "codex-native", version: VERSION },
+    { name: contract === "safe" ? "codex-safe" : "dsh-tools", version: VERSION },
     contract === "safe" ? { instructions: ZERO_RISK_MCP_INSTRUCTIONS } : undefined,
   );
 
@@ -531,7 +511,7 @@ export async function runChatGptMcpServer(options: {
       } catch (cleanupError) {
         throw new AggregateError(
           [error, cleanupError],
-          "Codex Native claim failed and its broker activity could not be retired",
+          `DSH turn claim failed: ${error instanceof Error ? error.message : String(error)}`,
         );
       }
       throw error;
@@ -554,7 +534,7 @@ export async function runChatGptMcpServer(options: {
     }
     throw new AggregateError(
       [firstError],
-      "Codex Native broker activity cleanup failed after an idempotent retry",
+      "DSH broker activity cleanup failed after an idempotent retry",
     );
   };
 
@@ -607,8 +587,16 @@ export async function runChatGptMcpServer(options: {
     tool: CodexTool,
     payload: { arguments?: Record<string, unknown>; input?: string },
     signal?: AbortSignal,
+    timeoutMsOverride?: number,
   ) => {
-    const timeoutMs = chatGptMcpInvocationTimeout(bound);
+    const budget = chatGptMcpInvocationTimeout(bound);
+    const timeoutMs = timeoutMsOverride === undefined
+      ? budget
+      : Math.min(budget, Math.max(1, timeoutMsOverride));
+    if (options.executor !== undefined) {
+      const result = await options.executor.call(wireName(tool), payload, signal);
+      return asMcpResult(result);
+    }
     try {
       const response = await callTurnBroker<BrokerToolResult>(options.brokerSocketPath, {
         method: "invoke",
@@ -630,7 +618,7 @@ export async function runChatGptMcpServer(options: {
       } catch (releaseError) {
         throw new AggregateError(
           [error, releaseError],
-          "Codex Native invocation failed and its abandoned broker binding could not be retired",
+          `DSH tool invocation failed: ${error instanceof Error ? error.message : String(error)}`,
         );
       }
       if (error instanceof TurnBrokerTimeoutError) {
@@ -643,7 +631,7 @@ export async function runChatGptMcpServer(options: {
           tool: toolName,
           timeout_ms: timeoutMs,
           retryable: false,
-          message: `Codex tool ${toolName} did not complete before the MCP transport deadline. The current turn binding was retired; do not retry it in this ChatGPT response.`,
+          message: `DSH tool ${toolName} did not complete before the MCP transport deadline. The current turn binding was retired; do not retry it in this ChatGPT response.`,
         }, true);
       }
       throw error;
@@ -669,50 +657,118 @@ export async function runChatGptMcpServer(options: {
 
   if (contract === "native") {
     server.registerTool(
-      "dsh_parallel",
+      TOOL_CALL_TOOL_NAME,
       {
-        title: "Submit independent native DSH calls together",
-        description: "Submit 1–8 independent calls from the current DSH inventory in one connector request. DSH retains native tool names, approvals and scheduling; concurrency-safe calls may overlap, while exclusive tools remain serialized. All calls are validated before any start. Results retain input order and individual failures; never retry the entire batch after a partial failure.",
+        title: "Call a tool in this session",
+        description: [
+          "Invoke any tool from the current agent session.",
+          "Use the exact wire_name from the session inventory.",
+          "Supports 1-8 independent calls; all are validated before any starts.",
+          "Use action=inventory to list the session's tools and schemas.",
+          "Pass session_token unchanged from the transport prompt; never guess wire names.",
+        ].join(" "),
         inputSchema: {
-          turn_token: turnTokenSchema,
+          session_token: turnTokenSchema,
+          action: z.enum(["call", "inventory"]).default("call"),
           calls: z.array(z.object({
             wire_name: z.string().min(1).max(1000),
             arguments: jsonArgumentsSchema.optional(),
             input: z.string().max(5_000_000).optional(),
-          })).min(1).max(8),
+          })).min(1).max(8).optional(),
+          query: z.string().max(500).optional(),
+          offset: z.number().int().min(0).max(100_000).default(0),
+          limit: z.number().int().min(1).max(100).default(50),
+          timeout_s: z.number().int().min(1).max(660).optional(),
         },
         annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
       },
-      async ({ turn_token, calls }, extra) => withClaimedTurn("dsh_parallel", turn_token, extra, async claimed => {
+      async (input, extra) => withClaimedTurn(TOOL_CALL_TOOL_NAME, input.session_token, extra, async claimed => {
         const bound = claimed.environment;
+        const visible = visibleSessionTools(bound);
+
+        if (input.action === "inventory") {
+          const needle = input.query?.trim().toLowerCase();
+          const matches = visible.filter(tool => !needle || [
+            wireName(tool),
+            tool.name,
+            tool.namespace ?? "",
+            tool.description,
+          ].join("\n").toLowerCase().includes(needle));
+          const offset = input.offset ?? 0;
+          const limit = input.limit ?? 50;
+          const page = matches.slice(offset, offset + limit).map(tool => ({
+            wire_name: wireName(tool),
+            name: tool.name,
+            namespace: tool.namespace ?? null,
+            description: browserToolDescription(tool),
+            kind: toolKind(tool),
+            parameters: browserToolParameters(tool),
+          }));
+          return result({
+            tools: page,
+            total: matches.length,
+            next_offset: offset + page.length < matches.length ? offset + page.length : null,
+          });
+        }
+
+        const calls = input.calls ?? [];
+        if (calls.length === 0) {
+          return result({
+            error: "invalid_request",
+            message: "tool_call requires at least one call: {\"calls\":[{\"wire_name\":\"...\",\"arguments\":{...}}]}. Use action=\"inventory\" to list tools.",
+          }, true);
+        }
+
         // Validate the entire batch first: a bad later entry must never dispatch an earlier one.
         const prepared = calls.map(call => {
-          const tool = safeVisibleTools(bound, contract).find(candidate => wireName(candidate) === call.wire_name);
-          if (!tool || call.wire_name === CODEX_COMPACTION_CONTROL_WIRE_NAME || BRIDGE_TOOL_NAMES.has(tool.name)) {
-            throw new Error(`DSH tool is not available for a native batch: ${call.wire_name}`);
+          const tool = visible.find(candidate => wireName(candidate) === call.wire_name);
+          if (!tool) {
+            const suggestions = suggestWireNames(visible, call.wire_name);
+            throw new Error(
+              `DSH tool is not available in this turn: ${call.wire_name}`
+              + (suggestions.length > 0 ? `. Closest names: ${suggestions.join(", ")}` : ""),
+            );
           }
           if (tool.freeform) {
-            if (call.input === undefined || Object.keys(call.arguments ?? {}).length) {
+            if (call.input === undefined || Object.keys(call.arguments ?? {}).length > 0) {
               throw new Error(`DSH freeform tool ${call.wire_name} requires input instead of arguments`);
             }
             return { tool, payload: { input: call.input } };
           }
-          if (call.input !== undefined) throw new Error(`DSH function tool ${call.wire_name} accepts arguments instead of input`);
+          if (call.input !== undefined) {
+            throw new Error(`DSH function tool ${call.wire_name} accepts arguments instead of input`);
+          }
           const args = call.arguments ?? {};
           assertBrowserToolArguments(tool, args);
           return { tool, payload: { arguments: args } };
         });
+
+        const timeoutMs = input.timeout_s === undefined ? undefined : input.timeout_s * 1000;
         // Start all broker invocations before awaiting any result. The native DSH
         // runtime, rather than this transport, decides which calls are safe to overlap.
+        const batchStartedAt = Date.now();
         const settled = await Promise.allSettled(prepared.map(({ tool, payload }) =>
-          invoke(claimed.bindingId, bound, tool, payload, extra.signal)));
+          invoke(claimed.bindingId, bound, tool, payload, extra.signal, timeoutMs)));
         const results = settled.map((entry, index) => ({
-          index, wire_name: calls[index]!.wire_name,
+          index,
+          wire_name: calls[index]!.wire_name,
           ...(entry.status === "fulfilled" ? entry.value : {
             isError: true,
             content: [{ type: "text" as const, text: entry.reason instanceof Error ? entry.reason.message : String(entry.reason) }],
           }),
         }));
+        auditToolBatch({
+          turnToken: input.session_token,
+          calls: prepared.map((entry, index) => ({
+            wireName: calls[index]!.wire_name,
+            payload: entry.payload,
+          })),
+          results: settled.map((entry, index) => entry.status === "fulfilled"
+            ? { result: entry.value }
+            : { error: entry.reason instanceof Error ? entry.reason.message : String(entry.reason) }),
+          startedAt: batchStartedAt,
+          endedAt: Date.now(),
+        });
         return {
           content: results.flatMap(entry => [
             { type: "text" as const, text: JSON.stringify({ index: entry.index, wire_name: entry.wire_name, isError: entry.isError === true }) },
@@ -723,64 +779,9 @@ export async function runChatGptMcpServer(options: {
         };
       }),
     );
-    for (const directName of DIRECT_DSH_TOOL_NAMES) {
-      server.registerTool(
-        directName,
-        {
-          title: `DSH ${directName}`,
-          description: `Invoke the live DSH ${directName} tool directly. Pass its native arguments in the arguments object and include the turn_token issued in the prompt. This is the DSH runtime surface; local-shell tools are intentionally not involved.`,
-          inputSchema: {
-            turn_token: turnTokenSchema,
-            arguments: jsonArgumentsSchema.optional(),
-            input: z.string().max(5_000_000).optional(),
-          },
-          annotations: {
-            readOnlyHint: [
-              "read", "read_image", "glob", "grep", "terminal_list", "terminal_read",
-              "get_goal", "list_subagent_models", "session_search", "session_trace",
-              "session_event_read", "session_event_search", "session_event_trace",
-            ].includes(directName),
-            destructiveHint: ![
-              "read", "read_image", "glob", "grep", "terminal_list", "terminal_read",
-              "get_goal", "list_subagent_models", "session_search", "session_trace",
-              "session_event_read", "session_event_search", "session_event_trace",
-            ].includes(directName),
-            idempotentHint: false,
-            openWorldHint: true,
-          },
-        },
-        async (input, extra) => withClaimedTurn(
-          directName,
-          input.turn_token,
-          extra,
-          async claimed => {
-            const bound = claimed.environment;
-            const tool = safeVisibleTools(bound, contract)
-              .find(candidate => wireName(candidate) === directName);
-            if (!tool) {
-              throw new Error(`DSH tool is not available in this turn: ${directName}`);
-            }
-            const args = input.arguments ?? {};
-            if (tool.freeform) {
-              if (input.input === undefined) {
-                throw new Error(`DSH freeform tool ${directName} requires input`);
-              }
-              if (Object.keys(args).length > 0) {
-                throw new Error(`DSH freeform tool ${directName} accepts input instead of arguments`);
-              }
-              return invoke(claimed.bindingId, bound, tool, { input: input.input }, extra.signal);
-            }
-            if (input.input !== undefined) {
-              throw new Error(`DSH function tool ${directName} accepts arguments instead of input`);
-            }
-            assertBrowserToolArguments(tool, args);
-            return invoke(claimed.bindingId, bound, tool, { arguments: args }, extra.signal);
-          },
-        ),
-      );
-    }
   }
 
+  if (contract === "safe") {
   server.registerTool(
     "codex_exec",
     {
@@ -1018,26 +1019,6 @@ export async function runChatGptMcpServer(options: {
     async (toolInput, extra) => {
       const { wire_name, arguments: args, input } = toolInput;
       const requestId = turnReference(contract, toolInput);
-      if (contract === "native" && wire_name === CODEX_COMPACTION_CONTROL_WIRE_NAME) {
-        if (input !== undefined) {
-          throw new Error("Compaction control handoff does not accept freeform input");
-        }
-        const handoffId = args?.handoff_id;
-        const summary = args?.summary;
-        if (typeof handoffId !== "string" || handoffId.length === 0) {
-          throw new Error("Compaction control handoff requires handoff_id");
-        }
-        if (typeof summary !== "string") {
-          throw new Error("Compaction control handoff requires summary");
-        }
-        await callTurnBroker(options.brokerSocketPath, {
-          method: "submit_compaction_handoff",
-          token: requestId,
-          handoffId,
-          summary,
-        }, 5_000, extra.signal);
-        return result({ submitted: true });
-      }
       return withClaimedTurn("codex_tool_call", requestId, extra, async claimed => {
         const bound = claimed.environment;
         const tool = safeVisibleTools(bound, contract)
@@ -1076,6 +1057,7 @@ export async function runChatGptMcpServer(options: {
       });
     },
   );
+  }
 
   if (contract === "safe") {
     server.registerTool(
@@ -1105,6 +1087,40 @@ export async function runChatGptMcpServer(options: {
     );
   }
 
+  return server;
+}
+
+export async function runChatGptMcpServer(options: {
+  brokerSocketPath: string;
+  contract?: ChatGptMcpContract;
+  transport?: Transport;
+}): Promise<McpServer> {
+  const server = createChatGptMcpServer(options);
   await server.connect(options.transport ?? new StdioServerTransport());
   return server;
+}
+
+/**
+ * Stateless Streamable HTTP endpoint for the ChatGPT connector. Each request creates a fresh
+ * server and transport; the turn token in the tool arguments carries all session identity.
+ */
+export async function handleChatGptMcpHttpRequest(
+  request: Request,
+  options: { brokerSocketPath: string; executor?: ToolExecutor },
+): Promise<Response> {
+  const server = createChatGptMcpServer({
+    brokerSocketPath: options.brokerSocketPath,
+    contract: "native",
+    ...(options.executor === undefined ? {} : { executor: options.executor }),
+  });
+  const transport = new WebStandardStreamableHTTPServerTransport({
+    sessionIdGenerator: undefined,
+    enableJsonResponse: true,
+  });
+  await server.connect(transport);
+  try {
+    return await transport.handleRequest(request);
+  } finally {
+    await server.close().catch(() => undefined);
+  }
 }

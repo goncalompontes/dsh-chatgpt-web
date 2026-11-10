@@ -1,4 +1,6 @@
 import { chatGptWebTraceId, createChatGptWebAdapter } from "./adapters/chatgpt-web";
+import { handleChatGptMcpHttpRequest } from "./adapters/chatgpt-web/mcp-server";
+import { connectMcpExecutor, type ToolExecutor } from "./tool-gateway/mcp-executor";
 import { closeChatGptBrowserWorkers } from "./adapters/chatgpt-web/browser-worker";
 import { closeTurnBrokers, TurnBroker } from "./adapters/chatgpt-web/turn-broker";
 import { timingSafeEqual, createHash } from "node:crypto";
@@ -6,6 +8,8 @@ import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { join } from "node:path";
 import { Readable } from "node:stream";
+import { spawn } from "node:child_process";
+import { fileURLToPath } from "node:url";
 import { chatGptTurnSessions } from "./adapters/chatgpt-web/turn-execution";
 import {
   cancelAllStructuredCompactions,
@@ -23,11 +27,18 @@ import type { AppConfig } from "./config";
 import {
   CHATGPT_WEB_TUNING_DEFAULTS,
   getConfigDir,
+  getConfigPath,
+  loadConfig,
   providerConfig,
   resolveChatGptWebTuning,
   saveConfig,
   validateChatGptWebTuning,
 } from "./config";
+import {
+  type ConfigReloadPlan,
+  watchBuiltCode,
+  watchSidecarConfig,
+} from "./hot-reload";
 import { AsyncEventQueue } from "./event-queue";
 import { readJsonRequestBody } from "./http-body";
 import { isLegacyDshTextCompaction } from "./responses/dsh-context";
@@ -988,6 +999,21 @@ export function startServer(
       );
     });
   }
+  let toolExecutorPromise: Promise<ToolExecutor | undefined> | undefined;
+  const toolExecutor = (): Promise<ToolExecutor | undefined> => {
+    if (toolExecutorPromise === undefined) {
+      const mcp = config.toolGateway?.mcp;
+      toolExecutorPromise = mcp === undefined
+        ? Promise.resolve(undefined)
+        : connectMcpExecutor(mcp).catch(error => {
+          console.error(
+            `[chatgpt-web] MCP tool executor unavailable: ${error instanceof Error ? error.message : String(error)}`,
+          );
+          return undefined;
+        });
+    }
+    return toolExecutorPromise;
+  };
   let draining = false;
   let shutdownPromise: Promise<void> | undefined;
   let successfulModelCatalogRequests = 0;
@@ -997,11 +1023,157 @@ export function startServer(
     active_http_turns: httpTurns.count(),
     active_browser_turns: chatGptTurnSessions.activeCount() + (turnBroker?.externalOwnerActiveCount() ?? 0),
   });
+
+  // ---- Hot reload state -------------------------------------------------
+  let server: RunningServer;
+  let configWatcher: ReturnType<typeof watchSidecarConfig> | undefined;
+  let codeWatcher: { stop(): void } | undefined;
+  let workerResetTimer: ReturnType<typeof setInterval> | undefined;
+  let hotRestartStarted = false;
+  const reloadState: {
+    last_reload_at: string | null;
+    last_error: string | null;
+    applied: string[];
+    deferred: string[];
+    worker_reset_pending: boolean;
+  } = {
+    last_reload_at: null,
+    last_error: null,
+    applied: [],
+    deferred: [],
+    worker_reset_pending: false,
+  };
+
+  const browserIdle = (): boolean => (
+    httpTurns.count() === 0
+    && chatGptTurnSessions.activeCount() === 0
+    && (turnBroker?.externalOwnerActiveCount() ?? 0) === 0
+  );
+
+  /**
+   * Retire workers built from the previous config only once no turn is using them. New turns
+   * already receive the new config; this releases the old browser pages and tool executor.
+   */
+  const scheduleIdleWorkerReset = (): void => {
+    reloadState.worker_reset_pending = true;
+    if (workerResetTimer) return;
+    workerResetTimer = setInterval(() => {
+      if (!browserIdle()) return;
+      if (workerResetTimer) clearInterval(workerResetTimer);
+      workerResetTimer = undefined;
+      if (!reloadState.worker_reset_pending) return;
+      reloadState.worker_reset_pending = false;
+      console.info("[chatgpt-web] hot reload: retiring workers built from the previous config");
+      chatGptTurnSessions.clear();
+      void closeChatGptBrowserWorkers().catch(error => {
+        console.error(
+          `[chatgpt-web] hot reload worker cleanup failed: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      });
+    }, 5_000);
+    workerResetTimer.unref?.();
+  };
+
+  const applyReloadedConfig = (next: AppConfig, plan: ConfigReloadPlan): void => {
+    reloadState.last_reload_at = new Date().toISOString();
+    reloadState.last_error = null;
+    reloadState.applied = plan.applied;
+    reloadState.deferred = plan.deferred;
+    const mcpExecutorChanged = plan.applied.includes("toolGateway");
+    if (mcpExecutorChanged) toolExecutorPromise = undefined;
+    console.info(
+      `[chatgpt-web] config hot reload applied=[${plan.applied.join(",")}]`
+      + (plan.deferred.length > 0 ? ` deferred_until_restart=[${plan.deferred.join(",")}]` : ""),
+    );
+    if (plan.workerReset) scheduleIdleWorkerReset();
+  };
+
+  const reloadConfigNow = (): ConfigReloadPlan => {
+    if (!configWatcher) throw new Error("Config hot reload is not initialized");
+    return configWatcher.reloadNow();
+  };
+
+  /**
+   * Drain and restart the process so newly built code is loaded. The operator-facing endpoint
+   * drains immediately; the build watcher waits for an idle gap first so active work is never
+   * rejected just because a build finished.
+   */
+  const requestHotRestart = async (
+    reason: string,
+    drainTimeoutMs = 15 * 60_000,
+    eagerDrain = true,
+  ): Promise<{ forced: boolean }> => {
+    if (hotRestartStarted) return { forced: false };
+    hotRestartStarted = true;
+    const deadline = Date.now() + Math.max(0, drainTimeoutMs);
+    if (eagerDrain) {
+      draining = true;
+      turnBroker?.setExternalOwnersAccepted(false);
+    }
+    while (Date.now() < deadline) {
+      if (browserIdle()) {
+        draining = true;
+        turnBroker?.setExternalOwnersAccepted(false);
+        // Close the race where a new turn starts between the idle probe and drain.
+        await new Promise(resolve => setTimeout(resolve, 250));
+        if (browserIdle()) break;
+        if (!eagerDrain) {
+          draining = false;
+          turnBroker?.setExternalOwnersAccepted(true);
+        }
+        continue;
+      }
+      await new Promise(resolve => setTimeout(resolve, 500));
+    }
+    const forced = !browserIdle();
+    console.info(`[chatgpt-web] hot restart (${reason}) forced=${forced}`);
+    configWatcher?.stop();
+    codeWatcher?.stop();
+    if (workerResetTimer) clearInterval(workerResetTimer);
+    await Promise.allSettled([closeChatGptBrowserWorkers(), closeTurnBrokers()]);
+    await Promise.race([
+      Promise.resolve(server.stop(true)).catch(() => {}),
+      new Promise<void>(resolve => setTimeout(resolve, 5_000)),
+    ]).catch(() => {});
+    if (process.env.DSH_WEB_STACK_MANAGED === "1") {
+      process.exit(0);
+    }
+    // No supervisor: start the replacement only after the listener has stopped, so there is no
+    // EADDRINUSE race, then let the old process exit.
+    spawn(process.execPath, process.argv.slice(1), {
+      detached: true,
+      stdio: "inherit",
+      env: { ...process.env, DSH_CHATGPT_WEB_REEXEC: "1" },
+    }).unref();
+    process.exit(0);
+    return { forced };
+  };
+  // -----------------------------------------------------------------------
   const controlAuthorized = (req: Request): boolean => {
     const header = req.headers.get("authorization") ?? "";
     const expected = Buffer.from(`Bearer ${config.controlToken}`);
     const actual = Buffer.from(header);
     return actual.length === expected.length && timingSafeEqual(actual, expected);
+  };
+  const constantTimeEqual = (actual: string, expected: string): boolean => {
+    const left = Buffer.from(actual);
+    const right = Buffer.from(expected);
+    return left.length === right.length && timingSafeEqual(left, right);
+  };
+  const isMcpPath = (pathname: string): boolean => (
+    pathname === "/mcp" || pathname === "/mcp-v2"
+    || pathname.startsWith("/mcp/") || pathname.startsWith("/mcp-v2/")
+  );
+  const mcpAuthorized = (req: Request, url: URL): boolean => {
+    const expected = config.mcpToken;
+    if (expected === undefined) return false;
+    const header = req.headers.get("authorization") ?? "";
+    const bearer = header.startsWith("Bearer ") ? header.slice(7).trim() : "";
+    if (constantTimeEqual(bearer, expected)) return true;
+    // Secret-path form for clients (including ChatGPT custom connectors) that cannot
+    // attach an Authorization header. The path segment is the capability.
+    const segments = url.pathname.split("/");
+    return constantTimeEqual(segments[2] ?? "", expected);
   };
   const handleFetch = async (req: Request): Promise<Response> => {
     const url = new URL(req.url);
@@ -1018,7 +1190,27 @@ export function startServer(
         successful_model_catalog_requests: successfulModelCatalogRequests,
         last_successful_model_catalog_request_at: lastSuccessfulModelCatalogRequestAt,
         browser_admission: chatGptTurnSessions.admissionMetrics(),
+        hot_reload: reloadState,
         ...activity(),
+      });
+    }
+    if (isMcpPath(url.pathname)) {
+      if (config.mcpToken === undefined) {
+        return new Response(
+          "MCP endpoint is not configured: add mcpToken to the plugin config.",
+          { status: 503, headers: { "content-type": "text/plain; charset=utf-8" } },
+        );
+      }
+      if (!mcpAuthorized(req, url)) {
+        return new Response("Unauthorized", {
+          status: 401,
+          headers: { "www-authenticate": "Bearer", "content-type": "text/plain; charset=utf-8" },
+        });
+      }
+      const executor = await toolExecutor();
+      return handleChatGptMcpHttpRequest(req, {
+        brokerSocketPath: config.brokerSocketPath,
+        ...(executor === undefined ? {} : { executor }),
       });
     }
     if (req.method === "OPTIONS" && url.pathname.startsWith("/v1/control/")) {
@@ -1046,6 +1238,7 @@ export function startServer(
         solAvailable: config.solAvailable,
         proAvailable: config.proAvailable,
         tuning: resolveChatGptWebTuning(config.tuning),
+        hot_reload: reloadState,
       }, { headers: controlCorsHeaders() });
     }
     if (req.method === "GET" && url.pathname === "/v1/control/config") {
@@ -1063,6 +1256,10 @@ export function startServer(
         // Mutate the in-memory config so the next turn's providerConfig(config) sees the new
         // tuning without a sidecar restart (workers are keyed by the serialized provider config).
         config.tuning = tuning;
+        reloadState.last_reload_at = new Date().toISOString();
+        reloadState.last_error = null;
+        reloadState.applied = ["tuning"];
+        scheduleIdleWorkerReset();
         return Response.json({ status: "ok", tuning }, { headers: controlCorsHeaders() });
       } catch (error) {
         return Response.json(
@@ -1070,6 +1267,49 @@ export function startServer(
           { status: 400, headers: controlCorsHeaders() },
         );
       }
+    }
+    if (req.method === "POST" && url.pathname === "/v1/control/reload") {
+      try {
+        const plan = reloadConfigNow();
+        return Response.json({
+          status: plan.noop ? "noop" : "ok",
+          plan,
+          hot_reload: reloadState,
+          accepting_turns: !draining,
+          ...activity(),
+        }, { headers: controlCorsHeaders() });
+      } catch (error) {
+        return Response.json(
+          { status: "error", error: error instanceof Error ? error.message : String(error) },
+          { status: 400, headers: controlCorsHeaders() },
+        );
+      }
+    }
+    if (req.method === "POST" && url.pathname === "/v1/control/hot-restart") {
+      let drainTimeoutMs = 15 * 60_000;
+      try {
+        const body = await req.json().catch(() => ({})) as { drainTimeoutMs?: unknown };
+        if (body.drainTimeoutMs !== undefined) {
+          if (typeof body.drainTimeoutMs !== "number" || !Number.isFinite(body.drainTimeoutMs)
+            || body.drainTimeoutMs < 0 || body.drainTimeoutMs > 60 * 60_000) {
+            throw new Error("drainTimeoutMs must be a number between 0 and 3600000");
+          }
+          drainTimeoutMs = body.drainTimeoutMs;
+        }
+      } catch (error) {
+        return Response.json(
+          { status: "error", error: error instanceof Error ? error.message : String(error) },
+          { status: 400, headers: controlCorsHeaders() },
+        );
+      }
+      const pending = activity();
+      void requestHotRestart("control API", drainTimeoutMs, true);
+      return Response.json({
+        status: "ok",
+        restarting: true,
+        drain_timeout_ms: drainTimeoutMs,
+        pending,
+      }, { headers: controlCorsHeaders() });
     }
     if (req.method === "GET" && url.pathname === "/v1/control/recent-turns") {
       const limit = Math.min(Math.max(Number(url.searchParams.get("limit") ?? 10) || 10, 1), 25);
@@ -1282,7 +1522,6 @@ export function startServer(
     return new Response("Not found", { status: 404 });
   };
 
-  let server: RunningServer;
   if (typeof Bun !== "undefined" && typeof Bun.serve === "function") {
     const bunServer = Bun.serve({
       hostname: config.host,
@@ -1312,13 +1551,52 @@ export function startServer(
     nodeServer.listen(config.port, config.host);
     server = {
       port: config.port,
-      stop: () => new Promise<void>((resolve) => nodeServer.close(() => resolve())),
+      stop: (force) => new Promise<void>((resolve) => {
+        const finish = () => resolve();
+        nodeServer.close(finish);
+        if (!force) return;
+        nodeServer.closeIdleConnections?.();
+        const timer = setTimeout(() => nodeServer.closeAllConnections?.(), 1_000);
+        timer.unref?.();
+      }),
     };
+  }
+
+  // Config edits are picked up from disk (and SIGHUP); built-code changes are applied by a
+  // drain-then-restart only when no turn is active. Disable code watching with
+  // DSH_CHATGPT_WEB_WATCH_CODE=0 if a deployment wants explicit reloads only.
+  configWatcher = watchSidecarConfig(getConfigPath(), config, {
+    onReload: applyReloadedConfig,
+    onError: error => {
+      reloadState.last_error = error.message;
+      console.error(`[chatgpt-web] config hot reload ignored an invalid file: ${error.message}`);
+    },
+  });
+  const watchCode = process.env.DSH_CHATGPT_WEB_WATCH_CODE === "1"
+    || (process.env.DSH_CHATGPT_WEB_WATCH_CODE !== "0" && process.env.DSH_WEB_STACK_MANAGED === "1");
+  if (watchCode) {
+    const builtDir = (() => {
+      try {
+        return fileURLToPath(new URL(".", import.meta.url));
+      } catch {
+        return process.cwd();
+      }
+    })();
+    codeWatcher = watchBuiltCode({
+      directory: builtDir,
+      onChanged: files => {
+        console.info(`[chatgpt-web] built code changed ([${files.join(",")}]); waiting for idle to hot restart`);
+        void requestHotRestart(`built code changed: ${files.join(",")}`, 15 * 60_000, false);
+      },
+    });
   }
 
   function shutdown(): void {
     if (shutdownPromise) return;
     draining = true;
+    configWatcher?.stop();
+    codeWatcher?.stop();
+    if (workerResetTimer) clearInterval(workerResetTimer);
     chatGptTurnSessions.clear();
     flushResponseState();
     shutdownPromise = (async () => {

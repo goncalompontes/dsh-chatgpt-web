@@ -133,10 +133,13 @@ export function buildChatGptWebModel(
     upgrade: null,
     default_reasoning_level: route.codexEffort,
     supported_reasoning_levels: [reasoningLevel(template, route.codexEffort, route.displayName)],
-    context_window: limits.contextWindow,
-    max_context_window: limits.contextWindow,
+    // Advertise the conversation capacity rather than the single-browser-message transport
+    // ceiling: ChatGPT Web compacts its own conversation, and an oversized canonical replay is
+    // recovered by resuming/continuing that conversation in the adapter.
+    context_window: limits.reportedContextWindow,
+    max_context_window: limits.reportedContextWindow,
     effective_context_window_percent: limits.effectiveContextWindowPercent,
-    auto_compact_token_limit: limits.autoCompactTokenLimit,
+    auto_compact_token_limit: limits.reportedAutoCompactTokenLimit,
     // ChatGPT Web has no Codex service tier. Never inherit the native template's Fast tiers.
     additional_speed_tiers: [],
     service_tiers: [],

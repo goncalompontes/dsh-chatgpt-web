@@ -66,6 +66,20 @@ describe("resource-aware browser capacity", () => {
     expect(controller.update(healthy, 10_005)).toBe(2);
   });
 
+  test("alternating healthy and invalid observations never scale up on stale confidence", () => {
+    const controller = new BrowserCapacityController(DEFAULT_BROWSER_CAPACITY_LIMITS, 3, 0);
+    const healthy = sample(64, 0, 32);
+    expect(controller.update(healthy, 0)).toBe(1);
+    expect(controller.update(healthy, 1)).toBe(1);
+    expect(controller.update(null, 2)).toBe(1);
+    expect(controller.update(healthy, 3)).toBe(1);
+    expect(controller.update(healthy, 4)).toBe(1);
+    expect(controller.update(healthy, 5)).toBe(2);
+    expect(controller.update({ ...healthy, availableMemoryBytes: 0 }, 6)).toBe(1);
+    expect(controller.update({ ...healthy, loadAverageOneMinute: Number.NaN }, 7)).toBe(1);
+    expect(controller.update(healthy, 8)).toBe(1);
+  });
+
   test("bad samples rapidly reduce but do not preempt active leases", () => {
     const controller = new BrowserCapacityController(DEFAULT_BROWSER_CAPACITY_LIMITS, 1, 0);
     expect(controller.update(sample(64, 0, 32), 1)).toBe(2);

@@ -85,6 +85,42 @@ Unavailable host metrics reduce admission to one. `/healthz` exposes current
 capacity, queue depth, maximum capacity, and the last resource measurements under
 `browser_admission`.
 
+Each turn runs in its own tab of one shared Chrome, so tabs can run in parallel
+when the host can afford them. On a memory-tight host the conservative estimate
+can be one tab even though the machine is busy. Set
+`DSH_CHATGPT_WEB_MIN_TURNS` (1..`DSH_CHATGPT_WEB_MAX_TURNS`) to keep at least that
+many tabs regardless of the estimate; this is an explicit memory-safety trade-off.
+A turn that waits longer than 10 minutes for a tab fails with a retryable
+`chatgpt_admission_timeout` instead of hanging; tune that with
+`DSH_CHATGPT_WEB_MAX_QUEUE_WAIT_MS`. Abandoned or cancelled turns release their tab
+after a short grace period, and tool-result continuations join their suspended
+turn even if the client rewrote its turn identity.
+
+### Hot reload
+
+The sidecar watches `config.json` (and handles `SIGHUP`) and applies every safe
+change to the running process. New turns use the new settings immediately;
+browser workers built from the previous config are retired as soon as no turn is
+active, so retained tabs are not lost mid-turn. An invalid or half-written file is
+ignored and the previous config keeps serving; the error appears in
+`/healthz` under `hot_reload`. Listener and broker-topology fields (`host`, `port`, `mode`, `purpose`,
+`brokerSocketPath`) cannot be rebound in place: they are reported as deferred and
+take effect on the next process start.
+
+Manual reloads:
+
+```bash
+dsh-chatgpt-web reload            # re-read config from disk now
+dsh-chatgpt-web reload --code     # drain, then restart to load newly built lib/
+curl -X POST -H "authorization: Bearer $TOKEN" localhost:17841/v1/control/reload
+```
+
+Built-code watching is enabled by default under the DSH web-stack supervisor and
+can be disabled with `DSH_CHATGPT_WEB_WATCH_CODE=0`. A `bun run build` triggers a
+drain-then-restart that waits for an idle gap, so in-flight turns finish first.
+`dsh-chatgpt-web reload --code --timeout 0` restarts immediately when you accept
+interrupting active turns.
+
 ---
 
 ## Quick Start
@@ -232,6 +268,25 @@ Example healthy output:
 Doctor result: ready
 ```
 
+### Auditing MCP and tool calls
+
+The companion Rust tool under [`audit/`](./audit/README.md) replaces the old
+`~/local-shell-mcp/watch.sh` viewer. It inspects the live bridge, broker
+traces and browser diagnostics, and records full tool arguments/results through
+the bridge's native audit sink (the recording proxy is optional):
+
+```bash
+cd audit && cargo build --release
+
+./target/release/dsh-audit            # interactive TUI
+./target/release/dsh-audit inspect    # one-shot report
+./target/release/dsh-audit doctor     # preflight checks
+./target/release/dsh-audit proxy      # optional raw HTTP/SSE capture
+```
+
+See [`audit/README.md`](./audit/README.md) for capture setup, correlation,
+privacy/redaction, keyboard shortcuts and export formats.
+
 ---
 
 ## Troubleshooting
@@ -245,7 +300,8 @@ See [TROUBLESHOOTING.md](./TROUBLESHOOTING.md) for common issues: browser execut
 1. **Unofficial Bridge:** Operates via local Playwright browser automation on `chatgpt.com`. Not affiliated with or endorsed by OpenAI.
 2. **Single-Session Concurrency:** Runs within a single browser tab. Sequential queries and normal DSH agent chats work seamlessly; avoid launching parallel multi-subagent swarms against the same tab simultaneously.
 3. **Pure Chat Only:** This provider generates pure conversational responses, explanations, reasoning, and code blocks. It does not execute local filesystem, terminal, or autonomous tool loops.
-4. **Standard Free Tier Rate Limits:** Subject to standard OpenAI free-tier hourly usage limits.
+4. **Context and compaction:** ChatGPT Web keeps and compacts its own conversation, so the provider advertises the conversation capacity rather than the much smaller single-message browser ceiling. Completed chats are retained per session and follow-ups only send their new instruction. If a fresh replay still cannot fit one browser message, the bridge keeps the newest complete turns and continues in the retained chat instead of returning `context_length_exceeded`. Only an individual turn that is itself larger than one browser message (for example one enormous tool result) is rejected.
+5. **Standard Free Tier Rate Limits:** Subject to standard OpenAI free-tier hourly usage limits.
 
 ---
 

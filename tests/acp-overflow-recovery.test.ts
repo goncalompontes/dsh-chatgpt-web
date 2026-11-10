@@ -57,10 +57,11 @@ test("a browser overflow after submission reaches ACP as context_length_exceeded
   }
 });
 
-test("headerless ACP overflow compacts safely and retries the same human turn without replaying its cached failure", async () => {
+test("an oversized ACP replay continues in the browser instead of failing with context_length_exceeded", async () => {
   const home = mkdtempSync(join(tmpdir(), "dsh-acp-overflow-"));
   const broker = TurnBroker.forSocket(join(home, "broker.sock"));
   const summaries: string[] = [];
+  const submitted: string[] = [];
   const fake = {
     async run(turn: any) {
       // This test starts without retained browser state, just like a restarted ACP client.
@@ -68,7 +69,9 @@ test("headerless ACP overflow compacts safely and retries the same human turn wi
       await turn.onPreparedSelected?.(false);
       const prompt = await turn.prepare();
       if (turn.traceId.includes("-compact-")) expect(turn.modelId).toBe("gpt-6");
-      // Enforce the actual preflight gate: the regression must first fail exactly as ACP did.
+      // Every prepared submission must stay inside the real browser transport gate. The adapter
+      // recovers an oversized canonical replay by omitting the oldest complete turns, so this is
+      // enforced against the submitted prompt rather than failing the turn.
       assertChatGptWebInputWithinLimits(estimateCompiledChatGptWebInputTokens(prompt, turn.modelId),
         estimateCompiledChatGptWebMessageTokens(prompt, turn.modelId), turn.modelId, "high", turn.capabilities,
         compiledChatGptWebMaxMessageChars(prompt));
@@ -77,6 +80,8 @@ test("headerless ACP overflow compacts safely and retries the same human turn wi
         expect(turn.capabilities.localToolsEnabled).toBe(false);
         expect(prompt.text).not.toContain("turn_token");
         summaries.push(prompt.text);
+      } else {
+        submitted.push(prompt.text);
       }
       const answer = summarizing ? "Recovered constraint: preserve existing files. Pending: continue the ACP investigation." : "CONTINUED";
       turn.onTextDelta(answer);
@@ -103,10 +108,19 @@ test("headerless ACP overflow compacts safely and retries the same human turn wi
     const history = [{ role: "user", content: "preserve existing files\n" + "old verified source evidence ".repeat(40_000) },
       { role: "assistant", content: "The prior browser turn was interrupted" }, current];
     const first = await (await request(history)).json() as any;
-    expect(first.error.code).toBe("context_length_exceeded");
+    // ChatGPT Web owns its conversation and compacts it itself, so the browser replay is fitted to
+    // the transport boundary and the same human turn continues instead of demanding /compact.
+    expect(first.status).toBe("completed");
+    expect(JSON.stringify(first.output)).toContain("CONTINUED");
+    expect(submitted).toHaveLength(1);
+    expect(submitted[0]).not.toContain("old verified source evidence");
+    expect(submitted[0]).toContain("continue the ACP investigation");
     const compact = await (await request([...history, { role: "user", content: directive }])).json() as any;
     expect(compact.status).toBe("completed");
     expect(summaries.length).toBeGreaterThan(2);
+    // A checkpoint must summarize the complete canonical history, so transport fit recovery must
+    // never trim it: every source fragment still carries the oldest evidence.
+    expect(summaries.join("\n")).toContain("old verified source evidence");
     expect(compact.output.some((item: any) => item.type === "compaction")).toBe(false);
     const checkpoint = `${DSH_CHECKPOINT_PREAMBLE}\n\n<compacted-summary>\nRecovered constraint: preserve existing files.\n</compacted-summary>`;
     const replacement = [{ role: "user", content: checkpoint }, current];
