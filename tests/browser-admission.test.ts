@@ -49,6 +49,55 @@ describe("bounded browser admission", () => {
     release();
   });
 
+  test("reports bounded recent queue latency percentiles without counting rejected or cancelled work", async () => {
+    let now = 0;
+    const queue = new ChatGptBrowserAdmission(1, 5, () => now);
+    const first = await queue.acquire();
+    expect(queue.metrics()).toMatchObject({ queueWaitSamples: 0, p50QueueWaitMs: 0, p95QueueWaitMs: 0, p99QueueWaitMs: 0 });
+    const controllers = Array.from({ length: 5 }, () => new AbortController());
+    const waits = controllers.map(controller => queue.acquire(controller.signal));
+    await expect(queue.acquire()).rejects.toThrow("queue is full");
+    controllers[2]!.abort();
+    await expect(waits[2]!).rejects.toHaveProperty("name", "AbortError");
+    now = 10;
+    first();
+    let release = await waits[0]!;
+    now = 20;
+    release();
+    release = await waits[1]!;
+    now = 40;
+    release();
+    release = await waits[3]!;
+    now = 100;
+    release();
+    release = await waits[4]!;
+    expect(queue.metrics()).toMatchObject({
+      admitted: 5, cancelled: 1, rejected: 1, queueWaitSamples: 4,
+      totalQueueWaitMs: 170, maxQueueWaitMs: 100,
+      p50QueueWaitMs: 20, p95QueueWaitMs: 100, p99QueueWaitMs: 100,
+    });
+    release();
+  });
+
+  test("retains only the most recent 256 completed queue waits", async () => {
+    let now = 0;
+    const queue = new ChatGptBrowserAdmission(1, 1, () => now);
+    let release = await queue.acquire();
+    for (let i = 0; i < 300; i++) {
+      const pending = queue.acquire();
+      now += i < 44 ? 1 : 10;
+      release();
+      release = await pending;
+    }
+    const metrics = queue.metrics();
+    expect(metrics).toMatchObject({
+      active: 1, pending: 0, queueWaitSamples: 256,
+      admitted: 301, totalQueueWaitMs: 2604,
+      p50QueueWaitMs: 10, p95QueueWaitMs: 10, p99QueueWaitMs: 10,
+    });
+    release();
+  });
+
   test("admits FIFO without exceeding the physical limit", async () => {
     const queue = new ChatGptBrowserAdmission(2);
     const a = await queue.acquire();
