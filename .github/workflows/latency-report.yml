@@ -1,0 +1,33 @@
+name: Offline latency report
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+jobs:
+  offline-latency:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - name: Test deterministic offline fixtures
+        run: bun test tests/latency-regression.test.ts
+      - name: Build synthetic report
+        run: |
+          node scripts/latency-regression.mjs \
+            --baseline tests/fixtures/latency-baseline.json \
+            --candidate tests/fixtures/latency-candidate.json \
+            --output latency-report.json \
+            --markdown latency-report.md
+      - name: Upload informational fixture reports
+        uses: actions/upload-artifact@v4
+        with:
+          name: synthetic-latency-report
+          path: |
+            latency-report.json
+            latency-report.md
+          retention-days: 7
