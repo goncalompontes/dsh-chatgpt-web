@@ -1643,7 +1643,7 @@ export async function setChatGptThinkMode(
 export function chatGptPromptIdentityMatches(
   expected: string,
   observed: string,
-  options: { truncated?: boolean; commonPrefixChars?: number } = {},
+  options: { truncated?: boolean; commonPrefixChars?: number; structuralProof?: boolean } = {},
 ): boolean {
   if (!expected || !observed) return false;
   if (observed === expected) return true;
@@ -1657,6 +1657,13 @@ export function chatGptPromptIdentityMatches(
   // The whole visible message is a prefix of the submitted prompt (virtualization or truncation
   // can make it shorter without changing its beginning).
   if (prefix >= observed.length) return true;
+  // Long compaction/transcript fragments can be collapsed with formatting or a connector pill
+  // that changes the visible prefix almost immediately (observed in practice: 818/10,242 chars).
+  // When the caller has independently proven this is the only new, newest user turn and ChatGPT
+  // exposes its Show-more expander, truncation itself is the identity evidence.
+  if (options.truncated === true && options.structuralProof === true && observed.length >= 512) {
+    return true;
+  }
   // A collapsed "Show more" render keeps the beginning but may cut mid-block; accept when the
   // visible prefix is substantial enough to prove identity rather than a different message.
   return options.truncated === true
@@ -3512,7 +3519,9 @@ export class ChatGptBrowserWorker {
           normalized === expected
           || mentions.some(mention => normalized.startsWith(mention) && normalized.slice(mention.length) === expected)
           || chatGptPromptIdentityMatches(expected, observedPrompt, {
-            truncated: actual.truncated, commonPrefixChars,
+            truncated: actual.truncated,
+            commonPrefixChars,
+            structuralProof: isLatestUserTurn && addedUsers.length === 1 && !ownUserStillPresent,
           })
         );
         if (!submittedPromptMatches || actual.truncated) {
