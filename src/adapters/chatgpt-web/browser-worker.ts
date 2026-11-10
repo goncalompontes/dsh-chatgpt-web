@@ -1585,6 +1585,22 @@ export function chatGptNewTurnIdentity(
   return added[0];
 }
 
+/**
+ * Stable conversation identity from the current URL. Temporary Chat starts as a local
+ * conversation (`/c/local-chatgpt:<uuid>`) and later migrates to a server conversation
+ * (`/c/<uuid>`); a change while a turn is active means the transcript was remounted.
+ */
+export function chatGptConversationIdentity(url: string): string | undefined {
+  try {
+    const parsed = new URL(url);
+    if (parsed.origin !== "https://chatgpt.com") return undefined;
+    const match = parsed.pathname.match(/^\/c\/([^/]+)/);
+    return match?.[1] ? decodeURIComponent(match[1]) : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 export function chatGptReboundTurnIdentity(
   initial: readonly string[],
   boundIdentity: string,
@@ -5339,10 +5355,12 @@ export class ChatGptBrowserWorker {
 
       let lastHeartbeat = 0;
       let finalText = "";
+      let emittedTextChars = 0;
       let sawRunning = false;
       let loggedCompletionWait = false;
       let capturedResponse = false;
       const sentAt = Date.now();
+      let conversationIdentity = chatGptConversationIdentity(page.url());
       const visibleTrace = new ChatGptVisibleTraceTracker();
       const markdownBuffer = new ChatGptMarkdownBuffer();
       const checkpointStream = turn.captureLunaCheckpoint
@@ -5350,14 +5368,17 @@ export class ChatGptBrowserWorker {
         : undefined;
       const emitMarkdownDelta = (delta: string): void => {
         const visible = checkpointStream ? checkpointStream.push(delta) : delta;
-        if (visible) turn.onTextDelta(visible);
+        if (visible) {
+          emittedTextChars += visible.length;
+          turn.onTextDelta(visible);
+        }
       };
       const throwMarkdownConsistencyError = (error: unknown): { markdown: string; delta: string } => {
         if (!(error instanceof ChatGptMarkdownConsistencyError)) throw error;
         console.warn(`[chatgpt-web] consistency warning handled gracefully: ${error.message}`);
         return { markdown: "", delta: "" };
       };
-      const domHealthTracker = new ChatGptTurnDomHealthTracker();
+      let domHealthTracker = new ChatGptTurnDomHealthTracker();
       const stoppedThinkingTracker = new ChatGptStoppedThinkingTracker();
       const responseDomCache: ChatGptResponseDomCache = {};
       let toolConfirmationGraceUntil = 0;
@@ -5609,6 +5630,46 @@ export class ChatGptBrowserWorker {
             completionActionVisible: false,
             externalProgressLive,
           });
+          const currentConversation = chatGptConversationIdentity(page.url());
+          if (domError
+            && emittedTextChars === 0
+            && currentConversation !== undefined
+            && currentConversation !== conversationIdentity) {
+            // Temporary Chat can migrate from a local conversation to a server conversation and
+            // remount the transcript. No text was delivered yet, so bind to the newest assistant
+            // turn in the new conversation and keep observing instead of failing the turn.
+            const state = await this.submissionDomState(page, {}, turn.abortSignal);
+            const latestAssistant = state.responseIdentities.at(-1);
+            console.warn(
+              `[chatgpt-web] browser turn ${turn.traceId} recovered a conversation remount`
+              + ` (${conversationIdentity ?? "unknown"} -> ${currentConversation},`
+              + ` assistantTurns=${state.assistantTurnCount})`,
+            );
+            conversationIdentity = currentConversation;
+            domHealthTracker = new ChatGptTurnDomHealthTracker();
+            responseDomCache.key = undefined;
+            responseDomCache.snapshot = undefined;
+            submissionBaseline = {
+              ...submissionBaseline,
+              userTurns: page.locator(CHATGPT_USER_TURN_SELECTOR),
+              responseTurns: page.locator(CHATGPT_ASSISTANT_TURN_SELECTOR),
+              initialUserTurnCount: state.userTurnCount,
+              initialResponseTurnCount: latestAssistant ? Math.max(0, state.assistantTurnCount - 1) : state.assistantTurnCount,
+              initialUserTurnIdentities: state.userIdentities,
+              initialResponseTurnIdentities: latestAssistant
+                ? state.responseIdentities.slice(0, -1)
+                : state.responseIdentities,
+              domCache: {},
+            };
+            if (latestAssistant) {
+              responseTurn = {
+                identity: latestAssistant,
+                locator: chatGptTurnLocator(page, latestAssistant),
+                acceptedUserTurnIdentities: state.userIdentities,
+              };
+            }
+            continue;
+          }
           if (domError) throw new Error(domError);
         }
         await new Promise(resolveSleep => setTimeout(resolveSleep, 250));
