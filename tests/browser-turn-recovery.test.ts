@@ -37,12 +37,13 @@ describe("multi-tab browser admission", () => {
     expect(() => browserTurnFloor("many", 8)).toThrow("between 1 and 128");
   });
 
-  test("the capacity controller starts at the configured tab floor and never drops below it", () => {    const controller = new BrowserCapacityController({
-      min: 2, max: 8, memoryReserveBytes: 0, defaultTurnRssBytes: 1024 ** 3, cpuHeadroomFraction: 0.5,
+  test("the capacity controller runs at the ceiling and throttles to the configured floor under pressure", () => {
+    const controller = new BrowserCapacityController({
+      min: 2, max: 8, memoryReserveBytes: 2 * 1024 ** 3, cpuHeadroomFraction: 0.5,
     });
-    expect(controller.current()).toBe(2);
-    // Tight memory would normally estimate one slot, but the explicit floor keeps two tabs.
-    expect(controller.update({ availableMemoryBytes: 1 * 1024 ** 3, cpuCount: 8, loadAverageOneMinute: 0 }, 0)).toBe(2);
+    expect(controller.current()).toBe(8);
+    // Real pressure reduces admission to the running/floor count, not the predictive slot model.
+    expect(controller.update({ availableMemoryBytes: 1 * 1024 ** 3, cpuCount: 8, loadAverageOneMinute: 0, activeTurns: 1 }, 0)).toBe(2);
   });
 });
 
