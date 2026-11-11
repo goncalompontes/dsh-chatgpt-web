@@ -61,9 +61,13 @@ export const CHATGPT_WEB_MEDIUM_HIGH_COMPOSER_CHAR_LIMIT = 1_048_572;
  * tokens with the 8,192-token platform reserve, 115,320 submitted characters). The first rejected
  * one carried 43,155 visible message tokens (51,347 estimated, 145,551 characters): ChatGPT
  * remounted the temporary chat and rendered "The message you submitted was too long, please edit
- * it and resubmit." 40,000 keeps every observed accepted payload and rejects the observed rejected
- * one before it reaches the composer. The 90,000-token value is the route's model context window,
- * not the size of a single browser message.
+ * it and resubmit." The sentinel then reported two more rejected replays from the same deployment
+ * (traces a9848e58328a at 57,456 estimated input tokens / 194,182 characters and 1f1d407c48b7 at
+ * 62,227 / 199,224), while the longest completed submission was trace 886ce48d4f2c at 126,763
+ * characters. Every observation is consistent with a visible-token boundary in (36,867, 43,155].
+ * 40,000 keeps every observed accepted payload and rejects every observed rejected one before it
+ * reaches the composer. The 90,000-token value is the route's model context window, not the size
+ * of one browser message.
  */
 export const CHATGPT_WEB_PLUS_MEDIUM_HIGH_MESSAGE_TOKEN_LIMIT = 40_000;
 /** Hidden ChatGPT product prompt and Codex Native schema reserve included in usage estimates. */

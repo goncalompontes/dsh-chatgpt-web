@@ -3,6 +3,7 @@ import {
   assertChatGptWebInputWithinLimits,
   assertChatGptWebMultipartInputWithinLimits,
 } from "../src/adapters/chatgpt-web/browser-worker";
+import { resolveChatGptWebTransportLimits } from "../src/chatgpt-web-models";
 import { resolveChatGptWebTuning, validateChatGptWebTuning } from "../src/config";
 
 const plusCapabilities = {
@@ -75,6 +76,34 @@ test("the High-effort temporary-chat overflow is stopped by the measured message
     plusCapabilities,
     194_182,
   )).toThrow(/40,000-token ChatGPT browser message boundary/);
+});
+
+test("Plus medium/high routes expose a measured one-message boundary, not just a composer box", () => {
+  // The 2026-11-11 sentinel failure happened because the transport model returned only a composer
+  // character limit for these routes, so the preflight fell through to the 80,000-token compaction
+  // threshold. A composer accepting text is not ChatGPT accepting it.
+  for (const modelId of ["gpt-6", "gpt-5.6-sol"] as const) {
+    for (const effort of ["medium", "high"] as const) {
+      const limits = resolveChatGptWebTransportLimits(modelId, effort, plusCapabilities);
+      expect(limits.browserMessageTokenLimit).toBe(40_000);
+      // The composer boundary stays a separate, much larger surface.
+      expect(limits.browserComposerCharLimit).toBe(1_048_572);
+    }
+  }
+  // Instant keeps its own measured message boundary; it must not inherit the medium/high one.
+  expect(resolveChatGptWebTransportLimits("gpt-6", "low", plusCapabilities).browserMessageTokenLimit)
+    .toBeUndefined();
+});
+
+test("the last captured overflow replay is rejected while the largest answered one still passes", () => {
+  // Trace 1f1d407c48b7 (2026-11-11T01:58Z, the last too-long failure before the fix deployed)
+  // submitted 199,224 characters and 54,035 visible tokens (62,227 with the platform reserve).
+  expect(() => assertChatGptWebInputWithinLimits(62_227, 54_035, "gpt-6", "high", plusCapabilities, 199_224))
+    .toThrow(/40,000-token ChatGPT browser message boundary/);
+
+  // The largest submission that ChatGPT actually answered on this deployment stays admissible.
+  expect(() => assertChatGptWebInputWithinLimits(45_059, 36_867, "gpt-6", "high", plusCapabilities, 115_320))
+    .not.toThrow();
 });
 
 test("unknown models are still rejected", () => {
