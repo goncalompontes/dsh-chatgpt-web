@@ -85,6 +85,26 @@ Unavailable host metrics reduce admission to one. `/healthz` exposes current
 capacity, queue depth, maximum capacity, and the last resource measurements under
 `browser_admission`.
 
+### Lighter automated browser
+
+Automated turns can run on Chrome's `chrome-headless-shell` build instead of the
+full browser. It is the same Blink engine without the browser UI, its WebUI
+renderer, and the extra utility process; measured here it used roughly half the
+process RSS and a quarter fewer processes at the same tab count. Login and any
+headed run keep the full Chrome binary:
+
+```json
+{
+  "chromeExecutablePath": "/usr/bin/google-chrome-stable",
+  "headlessBrowserExecutablePath": "/opt/chrome-headless-shell/chrome-headless-shell"
+}
+```
+
+The launch path recognizes the shell by its executable name and starts it in
+Playwright's headless mode; full Chrome keeps the explicit `--headless=new`
+switch. A shell binary cannot serve a headed turn, so `headless: true` configs
+must keep a full Chrome path for login.
+
 Each turn runs in its own tab of one shared Chrome, so tabs can run in parallel
 when the host can afford them. On a memory-tight host the conservative estimate
 can be one tab even though the machine is busy. Set

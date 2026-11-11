@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { chmodSync, existsSync, mkdirSync, readdirSync, rmSync, statSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { basename, join, resolve } from "node:path";
 import { chromium, type Browser, type BrowserContext, type Locator, type Page } from "playwright-core";
 import {
   atomicWriteFile,
@@ -1310,6 +1310,69 @@ export function resolveChatGptWebMultipartStagingMode(
   );
 }
 
+/** UA used for automated turns. ChatGPT serves the Windows layout the DOM selectors expect. */
+export const CHATGPT_WEB_BROWSER_USER_AGENT =
+  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36";
+
+export type ChatGptBrowserFlavor = "chrome" | "headless-shell";
+
+/**
+ * Chrome's headless shell is the same Blink engine without the browser UI, its WebUI renderer,
+ * and the extra utility process. It is already headless by construction.
+ */
+export function resolveChatGptBrowserFlavor(executablePath: string): ChatGptBrowserFlavor {
+  return /headless[-_]?shell/i.test(basename(executablePath)) ? "headless-shell" : "chrome";
+}
+
+export interface ChatGptBrowserLaunchProfile {
+  flavor: ChatGptBrowserFlavor;
+  executablePath: string;
+  headless: boolean;
+  args: string[];
+}
+
+/**
+ * Resolve the concrete browser launch for automated turns.
+ *
+ * An explicit headless browser replaces the login Chrome only for headless turns; headed turns and
+ * login keep the full Chrome build. Launch options follow the binary flavor: a headless-shell build
+ * must be started with Playwright's headless mode, while full Chrome keeps the explicit
+ * `--headless=new` switch so window sizing and the UA override continue to apply.
+ */
+export function chatGptBrowserLaunchProfile(input: {
+  chromeExecutablePath: string;
+  headlessBrowserExecutablePath?: string;
+  headed: boolean;
+}): ChatGptBrowserLaunchProfile {
+  const executablePath = !input.headed && input.headlessBrowserExecutablePath
+    ? input.headlessBrowserExecutablePath
+    : input.chromeExecutablePath;
+  const flavor = resolveChatGptBrowserFlavor(executablePath);
+  const commonArgs = [
+    "--disable-blink-features=AutomationControlled",
+    "--no-first-run",
+    "--no-default-browser-check",
+    "--window-size=1280,800",
+    ...(!input.headed ? [`--user-agent=${CHATGPT_WEB_BROWSER_USER_AGENT}`] : []),
+  ];
+  if (flavor === "headless-shell") {
+    if (input.headed) {
+      throw new Error(
+        "chrome-headless-shell cannot run headed. Use chromeExecutablePath for headed turns and "
+        + "headlessBrowserExecutablePath only for automated headless turns.",
+      );
+    }
+    // The shell resolves its own headless switches; a second --headless=new is redundant.
+    return { flavor, executablePath, headless: true, args: commonArgs };
+  }
+  return {
+    flavor,
+    executablePath,
+    headless: false,
+    args: [...(!input.headed ? ["--headless=new"] : []), ...commonArgs],
+  };
+}
+
 export const browserStageTimeouts = {
   browserPage: 60_000,
   temporaryChatPreparation: 150_000,
@@ -1587,6 +1650,8 @@ export interface ResolvedBrowserConfig {
   browserDiagnosticsPath?: string;
   storageStatePath: string;
   chromeExecutablePath: string;
+  /** Optional headless-shell (or other headless) executable used only for automated turns. */
+  headlessBrowserExecutablePath?: string;
   turnTimeoutMs?: number;
   headed: boolean;
   autoApproveToolCalls: boolean;
@@ -2375,6 +2440,7 @@ export function resolveBrowserConfig(provider: CodexProviderConfig): ResolvedBro
     && (!Number.isFinite(turnTimeoutMs) || turnTimeoutMs <= 0)) {
     throw new Error("ChatGPT Web turnTimeoutMs must be a positive finite number");
   }
+  const resolvedHeadlessBrowserPath = configured.headlessBrowserExecutablePath?.trim() || undefined;
   if (isLegacyChatGptConnectorName(appName)) {
     throw new Error(legacyChatGptConnectorMigrationMessage(appName));
   }
@@ -2386,6 +2452,9 @@ export function resolveBrowserConfig(provider: CodexProviderConfig): ResolvedBro
     browserDiagnosticsPath,
     storageStatePath: resolve(expandUserPath(configured.storageStatePath?.trim() || join(getConfigDir(), "browser", "storage-state.json"))),
     chromeExecutablePath: resolve(expandUserPath(configured.chromeExecutablePath?.trim() || defaultChromeExecutable())),
+    ...(resolvedHeadlessBrowserPath
+      ? { headlessBrowserExecutablePath: resolve(expandUserPath(resolvedHeadlessBrowserPath)) }
+      : {}),
     ...(turnTimeoutMs !== undefined ? { turnTimeoutMs } : {}),
     tuning,
     headed: configured.headed === true,
@@ -2716,6 +2785,27 @@ export class ChatGptBrowserWorker {
     }
   }
 
+  /** Launch the automated-turn browser described by the configured binaries. */
+  private async launchManagedBrowser(): Promise<Browser> {
+    const profile = chatGptBrowserLaunchProfile({
+      chromeExecutablePath: this.config.chromeExecutablePath,
+      headlessBrowserExecutablePath: this.config.headlessBrowserExecutablePath,
+      headed: this.config.headed,
+    });
+    if (!existsSync(profile.executablePath)) {
+      throw new Error(`Configured ${profile.flavor} executable does not exist: ${profile.executablePath}`);
+    }
+    console.info(
+      `[chatgpt-web] launching browser flavor=${profile.flavor}`
+      + ` executable=${profile.executablePath} headless=${profile.headless}`,
+    );
+    return chromium.launch({
+      executablePath: profile.executablePath,
+      headless: profile.headless,
+      args: profile.args,
+    });
+  }
+
   private async ensurePage(): Promise<Page> {
     if (this.page && !this.page.isClosed()) return this.page;
     if (this.config.browserHost === "launcher") {
@@ -2728,22 +2818,10 @@ export class ChatGptBrowserWorker {
     if (!existsSync(this.config.storageStatePath) || !existsSync(loginVerificationMarkerPath(this.config.storageStatePath))) {
       throw new Error(`ChatGPT web login state is missing: ${this.config.storageStatePath}`);
     }
-    const launchArgs = [
-      ...(!this.config.headed ? ["--headless=new"] : []),
-      "--disable-blink-features=AutomationControlled",
-      "--no-first-run",
-      "--no-default-browser-check",
-      "--window-size=1280,800",
-      ...(!this.config.headed ? ["--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36"] : []),
-    ];
-    this.browser = await chromium.launch({
-      executablePath: this.config.chromeExecutablePath,
-      headless: false,
-      args: launchArgs,
-    });
+    this.browser = await this.launchManagedBrowser();
     this.context = await this.browser.newContext({
       storageState: this.config.storageStatePath,
-      ...(!this.config.headed ? { userAgent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36" } : {}),
+      ...(!this.config.headed ? { userAgent: CHATGPT_WEB_BROWSER_USER_AGENT } : {}),
     });
     await this.context.addInitScript("globalThis.__name = (t, v) => t;");
     this.page = await this.context.newPage();
@@ -2756,25 +2834,10 @@ export class ChatGptBrowserWorker {
       if (!existsSync(this.config.storageStatePath) || !existsSync(loginVerificationMarkerPath(this.config.storageStatePath))) {
         throw new Error(`ChatGPT web login state is missing: ${this.config.storageStatePath}`);
       }
-      if (!existsSync(this.config.chromeExecutablePath)) {
-        throw new Error(`Configured Chrome executable does not exist: ${this.config.chromeExecutablePath}`);
-      }
-      const launchArgs = [
-        ...(!this.config.headed ? ["--headless=new"] : []),
-        "--disable-blink-features=AutomationControlled",
-        "--no-first-run",
-        "--no-default-browser-check",
-        "--window-size=1280,800",
-        ...(!this.config.headed ? ["--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36"] : []),
-      ];
-      const browser = await chromium.launch({
-        executablePath: this.config.chromeExecutablePath,
-        headless: false,
-        args: launchArgs,
-      });
+      const browser = await this.launchManagedBrowser();
       const context = await browser.newContext({
         storageState: this.config.storageStatePath,
-        ...(!this.config.headed ? { userAgent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36" } : {}),
+        ...(!this.config.headed ? { userAgent: CHATGPT_WEB_BROWSER_USER_AGENT } : {}),
       });
       await context.addInitScript("globalThis.__name = (t, v) => t;");
       this.browser = browser;

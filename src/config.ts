@@ -180,6 +180,11 @@ export interface AppConfig {
   browserInteractionMode: BrowserInteractionMode;
   browserHostDescriptorPath?: string;
   chromeExecutablePath: string;
+  /**
+   * Optional headless-only browser executable for automated turns. The full Chrome build stays the
+   * login/headed binary; when this is set, headless turns run on the lighter build instead.
+   */
+  headlessBrowserExecutablePath?: string;
   storageStatePath: string;
   brokerSocketPath: string;
   headed: boolean;
@@ -563,6 +568,16 @@ function parseConfig(value: unknown, path: string): AppConfig {
     && !isAbsolute(expandUserPath(parsed.browserHostDescriptorPath!))) {
     throw new Error(`Launcher browserHostDescriptorPath must be absolute in ${path}`);
   }
+  if (parsed.headlessBrowserExecutablePath !== undefined) {
+    if (typeof parsed.headlessBrowserExecutablePath !== "string" || !parsed.headlessBrowserExecutablePath.trim()) {
+      throw new Error(`Invalid headlessBrowserExecutablePath in ${path}`);
+    }
+    const headlessPath = expandUserPath(parsed.headlessBrowserExecutablePath);
+    if (!isAbsolute(headlessPath)) {
+      throw new Error(`headlessBrowserExecutablePath must be absolute in ${path}`);
+    }
+    parsed.headlessBrowserExecutablePath = headlessPath;
+  }
   const brokerEndpoint = expandUserPath(parsed.brokerSocketPath!);
   if (process.platform === "win32") {
     if (!isWindowsPipeEndpoint(brokerEndpoint)) {
@@ -770,6 +785,7 @@ export function providerConfig(config: AppConfig): CodexProviderConfig {
       browserHostDescriptorPath: config.browserHostDescriptorPath,
       storageStatePath: config.storageStatePath,
       chromeExecutablePath: config.chromeExecutablePath,
+      headlessBrowserExecutablePath: config.headlessBrowserExecutablePath,
       brokerSocketPath: config.brokerSocketPath,
       threadEnvironmentStatePath: join(getConfigDir(), "runtime", "thread-environments.json"),
       lunaCheckpointStatePath: join(getConfigDir(), "runtime", "luna-checkpoints.json"),

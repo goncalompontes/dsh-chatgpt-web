@@ -312,6 +312,11 @@ export interface CodexProviderConfig {
     storageStatePath?: string;
     /** System Chrome executable. The runtime never downloads a browser. */
     chromeExecutablePath?: string;
+    /**
+     * Optional headless-only executable (for example `chrome-headless-shell`) used for automated
+     * turns. Login and other headed flows keep using `chromeExecutablePath`.
+     */
+    headlessBrowserExecutablePath?: string;
     /** Unix socket bridging the turn-bound MCP capability into outer Codex tools. */
     brokerSocketPath?: string;
     /** Persisted, trusted Codex task authority used for follow-up turns that omit the envelope. */
