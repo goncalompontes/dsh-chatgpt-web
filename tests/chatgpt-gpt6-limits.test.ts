@@ -3,8 +3,11 @@ import {
   assertChatGptWebInputWithinLimits,
   assertChatGptWebMultipartInputWithinLimits,
 } from "../src/adapters/chatgpt-web/browser-worker";
+import { resolveChatGptWebModelMode } from "../src/adapters/chatgpt-web/model";
 import { resolveChatGptWebTransportLimits } from "../src/chatgpt-web-models";
-import { resolveChatGptWebTuning, validateChatGptWebTuning } from "../src/config";
+import { defaultConfig, resolveChatGptWebTuning, validateChatGptWebTuning } from "../src/config";
+import { parseRequest } from "../src/responses/parser";
+import { routeChatGptWebRequest } from "../src/server";
 
 const plusCapabilities = {
   localToolsEnabled: true,
@@ -124,4 +127,31 @@ test("GPT-6 reaches Bigger Context instead of the model gate", () => {
 test("Luna is still refused by Bigger Context", () => {
   expect(() => assertChatGptWebMultipartInputWithinLimits(100, 100, "gpt-5.6-luna", "low", plusCapabilities, 1_000, 2))
     .toThrow(/Bigger Context is unavailable for Luna/);
+});
+
+test("GPT-6 effort slugs pin the browser model row and the effort stop", () => {
+  const cases = [
+    ["chatgpt-web/gpt-6-light", "low", 0, "Instant (即时)"],
+    ["chatgpt-web/gpt-6-medium", "medium", 1, "Medium (中等)"],
+    ["chatgpt-web/gpt-6-high", "high", 2, "High (高)"],
+  ] as const;
+  const config = defaultConfig();
+  for (const [slug, effort, uiEffortIndex, displayLabel] of cases) {
+    const parsed = parseRequest({ model: slug, input: [{ role: "user", content: "ping" }] });
+    routeChatGptWebRequest(parsed, config);
+    expect(parsed.modelId).toBe("gpt-6");
+    expect(parsed.options.reasoning).toBe(effort);
+    expect(resolveChatGptWebModelMode(parsed.modelId, parsed.options.reasoning, plusCapabilities)).toMatchObject({
+      modelId: "gpt-6",
+      effort,
+      uiEffortIndex,
+      displayLabel,
+    });
+  }
+  // The Sol slugs must keep the Sol row instead of silently using GPT-6.
+  const sol = parseRequest({ model: "chatgpt-web/high", input: [{ role: "user", content: "ping" }] });
+  routeChatGptWebRequest(sol, config);
+  expect(sol.modelId).toBe("gpt-5.6-sol");
+  expect(resolveChatGptWebModelMode(sol.modelId, sol.options.reasoning, plusCapabilities))
+    .toMatchObject({ effort: "high", uiEffortIndex: 2, displayLabel: "High (高)" });
 });
