@@ -1144,7 +1144,7 @@ export function assertChatGptWebInputWithinLimits(
     effort,
     capabilities,
   );
-  const { browserMessageTokenLimit, browserComposerCharLimit } = resolveChatGptWebTransportLimits(
+  const { browserMessageTokenLimit, browserSubmissionTokenLimit, browserComposerCharLimit } = resolveChatGptWebTransportLimits(
     modelId,
     effort,
     capabilities,
@@ -1159,6 +1159,17 @@ export function assertChatGptWebInputWithinLimits(
   ) {
     throw new ChatGptWebAdapterError(
       `This prompt contains ${promptChars.toLocaleString("en-US")} inline characters, which exceeds the ${effectiveComposerCharLimit.toLocaleString("en-US")}-character ChatGPT composer boundary for this account and effort. The bridge keeps older conversation history in the retained chat; this turn's own payload must fit one composer message.`,
+      { status: 400, errorType: "invalid_request_error", code: "context_length_exceeded", retryable: false },
+    );
+  }
+  // The account-level submission budget is the binding transport constraint for an inline turn:
+  // ChatGPT compiles this message together with its own hidden platform prompt, and the measured
+  // ceiling for that compiled request is well below the route's model context window. A message
+  // that fits one *browser message* boundary can therefore still be rejected as too long, so the
+  // total is checked before the per-message staging boundary.
+  if (browserSubmissionTokenLimit !== undefined && estimatedInputTokens > browserSubmissionTokenLimit) {
+    throw new ChatGptWebAdapterError(
+      `This turn is estimated at ${estimatedInputTokens.toLocaleString("en-US")} input tokens, which exceeds the measured ${browserSubmissionTokenLimit.toLocaleString("en-US")}-token ChatGPT Web submission budget for this account. The budget covers this browser message plus ChatGPT's hidden platform prompt, so older history must be compacted or omitted before it is submitted.`,
       { status: 400, errorType: "invalid_request_error", code: "context_length_exceeded", retryable: false },
     );
   }
