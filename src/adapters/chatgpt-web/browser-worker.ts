@@ -197,6 +197,17 @@ export async function chatGptPageIsRehydrating(page: Page): Promise<boolean> {
 export const CHATGPT_MULTIPART_RESPONSE_DOM_GRACE_MS = 180_000;
 export const CHATGPT_EMPTY_RESPONSE_GRACE_MS = 10_000;
 export const CHATGPT_COMPLETION_ACTION_GRACE_MS = 60_000;
+/**
+ * ChatGPT's own turn-lifecycle projection.
+ *
+ * The client derives this value from the conversation message state: `complete` only when the
+ * message is `finished_successfully`, carries `end_turn: true` and is neither a client-only nor an
+ * optimistic node; `streaming` while a request is active; `pending` otherwise. It is the semantic
+ * owner of "this turn is finished", while the copy button is one footer control that the client may
+ * omit (its own `showCopyButton` gate is independent of the turn state) and that can sit before
+ * trailing non-answer nodes such as connector tool cards.
+ */
+export const CHATGPT_TURN_RESPONSE_STATE_ATTRIBUTE = "data-dil-talvt-response-state";
 export const CHATGPT_COMPLETION_SETTLE_MS = 2_000;
 export const CHATGPT_TOOL_CONFIRMATION_TIMEOUT_MS = 60_000;
 /** Approval controls are rendered in several React commits; keep polling the live DOM during that window. */
@@ -232,6 +243,7 @@ const CHATGPT_DOM_REVISION_ATTRIBUTES = [
   "data-chatgpt-search-unit-key",
   "data-content-search-unit-key",
   "data-state",
+  "data-dil-talvt-response-state",
   "data-streaming-response-status",
   "data-testid",
   "data-turn",
@@ -2185,7 +2197,11 @@ interface ChatGptResponseDomSnapshot {
   completionActionVisible: boolean;
   stoppedThinkingVisible: boolean;
   traceBlocks: ChatGptVisibleTraceBlock[];
+  /** ChatGPT's own turn state, when this DOM version exposes it. */
+  responseState?: ChatGptTurnResponseState;
 }
+
+export type ChatGptTurnResponseState = "pending" | "streaming" | "complete";
 
 interface ChatGptResponseDomCache {
   key?: string;
@@ -2405,6 +2421,13 @@ class ChatGptBrowserDiagnostics {
                 textChars: (element.textContent ?? "").length,
                 htmlChars: (element as HTMLElement).innerHTML.length,
               })),
+              // The client's own turn lifecycle; the difference between "pending" and "complete"
+              // decides whether a missing footer is a DOM change or an unfinished turn.
+              responseStates: assistantTurns.map(element => (
+                element.closest("[data-dil-talvt-response-state]")?.getAttribute("data-dil-talvt-response-state")
+                  ?? element.querySelector("[data-dil-talvt-response-state]")?.getAttribute("data-dil-talvt-response-state")
+                  ?? null
+              )),
               // Attribute-only ancestry reveals renderer/virtualization changes without
               // duplicating user prompts or MCP outputs into the diagnostic log.
               semanticRoots: [...document.querySelectorAll('[data-message-author-role], [data-message-id], [data-markdown-text-style], main p, main [data-testid]')]
@@ -5036,6 +5059,18 @@ export class ChatGptBrowserWorker {
           .find(candidate => !rendered.contains(candidate)
             && Boolean(rendered.compareDocumentPosition(candidate) & Node.DOCUMENT_POSITION_FOLLOWING))
         : undefined;
+      // The turn's own lifecycle state, not a footer button, is the semantic completion owner.
+      // The copy action is rendered from an independent client gate and can therefore be absent on
+      // a finished turn, and trailing non-answer nodes inside the turn (connector tool cards) can
+      // sit after it; requiring the action to follow the last Markdown root then finds nothing.
+      const responseState = (() => {
+        const holder = root.closest<HTMLElement>(`[${options.responseStateAttribute}]`)
+          ?? root.querySelector<HTMLElement>(`[${options.responseStateAttribute}]`);
+        const value = holder?.getAttribute(options.responseStateAttribute);
+        return value === "complete" || value === "streaming" || value === "pending"
+          ? value as "complete" | "streaming" | "pending"
+          : undefined;
+      })();
       const completionActionSet = new Set(completionAction ? [completionAction] : []);
       const candidates = new Map<HTMLElement, ChatGptVisibleTraceBlock["kind"]>();
       renderedRoots.forEach(candidate => candidates.set(candidate, "answer"));
@@ -5157,13 +5192,16 @@ export class ChatGptBrowserWorker {
           visibleText: renderedRoots.map(candidate => candidate.innerText.trim()).filter(Boolean).join("\n\n"),
           fullHtml: renderedRoots.map(candidate => candidate.innerHTML).join(""),
           markdownSegments,
-          completionActionVisible: completionAction !== undefined,
+          completionActionVisible: completionAction !== undefined
+            || responseState === "complete",
           stoppedThinkingVisible,
+          responseState,
           traceBlocks,
         },
       };
     }, {
       completionActionSelector: CHATGPT_COMPLETION_ACTION_SELECTOR,
+      responseStateAttribute: CHATGPT_TURN_RESPONSE_STATE_ATTRIBUTE,
       knownKey: cache?.key,
       attributeFilter: [...CHATGPT_DOM_REVISION_ATTRIBUTES],
     }, { timeout: chatGptDomObservationTimeoutMs(this.activeRuns?.size ?? 1) }).catch(async error => {
@@ -5218,6 +5256,9 @@ export class ChatGptBrowserWorker {
         return {
           textChars: (root.innerText ?? root.textContent ?? "").trim().length,
           htmlChars: root.innerHTML.length,
+          responseState: root.closest("[data-dil-talvt-response-state]")?.getAttribute("data-dil-talvt-response-state")
+            ?? root.querySelector("[data-dil-talvt-response-state]")?.getAttribute("data-dil-talvt-response-state")
+            ?? null,
           descriptors,
         };
       })

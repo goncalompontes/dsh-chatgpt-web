@@ -160,6 +160,48 @@ browserTest("completion action outside the answer root invalidates the DOM cache
   }
 });
 
+browserTest("a finished turn's own response state proves completion when its footer action is not the last node", async () => {
+  const browser = await chromium.launch({ executablePath, headless: true });
+  try {
+    const context = await browser.newContext();
+    await context.addInitScript("globalThis.__name = value => value");
+    const page = await context.newPage();
+    const worker: any = Object.create(ChatGptBrowserWorker.prototype);
+    const cache = {};
+    // ChatGPT's connector rounds leave tool cards after the assistant message, so the turn's copy
+    // action is not the last Markdown node. The client's own turn state is the completion owner.
+    await page.setContent(`<main><section id="turn" data-dil-talvt-response-state="pending">
+      <div class="markdown"><p>Final answer</p></div>
+      <button data-testid="copy-turn-action-button">Copy</button>
+      <div class="markdown"><p>Connector tool result</p></div>
+    </section></main>`);
+    const response = page.locator("#turn");
+    const pending = await worker.responseDomSnapshot(response, cache);
+    expect(pending.responseState).toBe("pending");
+    expect(pending.completionActionVisible).toBe(false);
+
+    // The same DOM, now finalized by the client. The copy action still precedes the trailing tool
+    // card, so only the turn state can prove completion. This transition must also invalidate the
+    // observation cache or the finished turn would never be observed as complete.
+    await page.locator("#turn").evaluate(element => {
+      element.setAttribute("data-dil-talvt-response-state", "complete");
+    });
+    const complete = await worker.responseDomSnapshot(response, cache);
+    expect(complete.responseState).toBe("complete");
+    expect(complete.completionActionVisible).toBe(true);
+
+    // A wrapper may own the state instead of the bound turn element itself.
+    await page.setContent(`<main><div data-dil-talvt-response-state="complete"><section id="wrapped">
+      <div class="markdown"><p>Wrapped answer</p></div>
+    </section></div></main>`);
+    const wrapped = await worker.responseDomSnapshot(page.locator("#wrapped"), {});
+    expect(wrapped.responseState).toBe("complete");
+    expect(wrapped.completionActionVisible).toBe(true);
+  } finally {
+    await browser.close();
+  }
+});
+
 test("snapshot evaluation failures are distinguished from missing response nodes", async () => {
   const worker: any = Object.create(ChatGptBrowserWorker.prototype);
   const response: any = {
