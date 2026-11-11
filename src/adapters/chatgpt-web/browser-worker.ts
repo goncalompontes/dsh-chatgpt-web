@@ -83,7 +83,7 @@ import {
   resolveChatGptWebTransportLimits,
 } from "../../chatgpt-web-models";
 import { LauncherBrowserHelperClient } from "./launcher-helper-client";
-import { MAX_CHATGPT_BROWSER_TABS } from "./concurrency";
+import { MAX_CHATGPT_BROWSER_TABS, MAX_RETAINED_CHATGPT_TABS } from "./concurrency";
 import { chatGptWebBackoffDelayMs, chatGptWebRetryAfterMs, sleep } from "./backoff";
 import {
   ChatGptSurfaceStaleError,
@@ -105,9 +105,20 @@ import type {
   ChatGptTurnProgressReader,
 } from "./turn-progress";
 
-export { MAX_CHATGPT_BROWSER_TABS } from "./concurrency";
+export { MAX_CHATGPT_BROWSER_TABS, MAX_RETAINED_CHATGPT_TABS } from "./concurrency";
 
 const workers = new Map<string, ChatGptBrowserWorker>();
+
+/**
+ * Drop idle retained conversation tabs across every configured worker. Host memory pressure is
+ * the one signal that outranks cache warmth: a retained tab is a full ChatGPT renderer that no
+ * turn is using, so releasing it is always safe and immediately returns its memory.
+ */
+export async function trimIdleChatGptConversations(limit: number): Promise<void> {
+  await Promise.all([...new Set(workers.values())].map(
+    worker => worker.trimRetainedConversations(limit),
+  ));
+}
 
 export async function closeChatGptBrowserWorkers(): Promise<void> {
   const active = [...workers.values()];
@@ -870,13 +881,24 @@ export async function throwIfChatGptTerminalErrorAlert(scope: ChatGptTextScope):
   );
 }
 
+/**
+ * ChatGPT's composer-overflow rejection. The copy is singular when the submission carried a single
+ * message ("The message you submitted was too long, please edit and resubmit.") and plural when it
+ * carried several ("The messages you submitted were too long, please edit them and resubmit."),
+ * so match the invariant sentence shape instead of one exact wording. Missing the singular form
+ * left the alert on screen until the assistant-turn grace expired and the turn failed as
+ * "did not create a response DOM".
+ */
+export const CHATGPT_MESSAGE_TOO_LONG_ALERT =
+  /The messages? you submitted (?:was|were) too long[\s\S]*resubmit/i;
+
 /** Submission failures can replace the assistant node with a sibling alert. */
 export async function throwIfChatGptSubmissionErrorAlert(page: Page): Promise<void> {
   const alerts = page.locator('main [role="alert"]');
-  const overflow = alerts.filter({ hasText: /The messages you submitted were too long[\s\S]*please edit them and resubmit/i }).last();
+  const overflow = alerts.filter({ hasText: CHATGPT_MESSAGE_TOO_LONG_ALERT }).last();
   if (await overflow.isVisible().catch(() => false)) {
     throw new ChatGptWebAdapterError(
-      "ChatGPT rejected the submitted messages as too long. Compact the conversation before retrying.",
+      "ChatGPT rejected the submitted message as too long. Compact the conversation before retrying.",
       { status: 400, errorType: "invalid_request_error", code: "context_length_exceeded", retryable: false },
     );
   }
@@ -1282,6 +1304,27 @@ export const browserStageTimeouts = {
   // earlier parts. This budget covers ChatGPT accepting the submission, not just the click.
   multipartStageSend: 180_000,
 } as const;
+
+/** Ceiling for one inline submission, aligned with the multipart stage budget. */
+export const CHATGPT_SEND_BUDGET_MAX_MS = 180_000;
+/**
+ * Submission-acceptance growth per visible prompt character.
+ *
+ * The flat `send` stage budget only ever covered the click plus a small prompt's echo. ChatGPT has
+ * to render and ingest the whole prompt before it can render the user turn, so a turn carrying
+ * ~133k characters (~40k estimated tokens) outlived the 20 s floor with only two tabs active; the
+ * stage timeout then surfaced as an ambiguous submission. Grow the budget with the payload while
+ * keeping a bounded ceiling so a genuinely stuck send still fails.
+ */
+export const CHATGPT_SEND_BUDGET_PER_CHAR_MS = 0.5;
+
+export function chatGptSendBudgetMs(maxChars: number): number {
+  const chars = Number.isFinite(maxChars) && maxChars > 0 ? maxChars : 0;
+  return Math.min(
+    CHATGPT_SEND_BUDGET_MAX_MS,
+    Math.max(browserStageTimeouts.send, Math.ceil(chars * CHATGPT_SEND_BUDGET_PER_CHAR_MS)),
+  );
+}
 
 /** Bounded preparation attempts; each retry waits with exponential backoff before reloading. */
 export const CHATGPT_TEMPORARY_CHAT_PREPARATION_ATTEMPTS = 3;
@@ -2421,7 +2464,9 @@ export class ChatGptBrowserWorker {
   private launcherHelper?: LauncherBrowserHelperClient;
   private maintenanceTail: Promise<void> = Promise.resolve();
   private readonly activeRuns = new Map<string, Promise<string>>();
-  private readonly managedConversations = new ManagedConversationPool<Page>(MAX_CHATGPT_BROWSER_TABS);
+  // Idle conversation tabs are a warm-cache optimization, not running turns, so they get their
+  // own small ceiling instead of sharing the turn limit (one retained tab is a full renderer).
+  private readonly managedConversations = new ManagedConversationPool<Page>(MAX_RETAINED_CHATGPT_TABS);
 
   commitManagedConversation(key: string, fingerprint: string): void {
     this.managedConversations.commit(key, fingerprint);
@@ -2429,6 +2474,11 @@ export class ChatGptBrowserWorker {
 
   releaseManagedConversation(key: string): Promise<void> {
     return this.managedConversations.release(key);
+  }
+
+  /** Close idle retained conversation tabs above `limit`. Running turns are never touched. */
+  trimRetainedConversations(limit: number): Promise<void> {
+    return this.managedConversations.trim(limit);
   }
 
   private constructor(private readonly config: ResolvedBrowserConfig) {}
@@ -4967,7 +5017,7 @@ export class ChatGptBrowserWorker {
       const key = turn.retainConversation ? turn.conversationKey : undefined;
       let retained = key ? await this.managedConversations.take(key, turn.conversationPredecessor) : undefined;
       try {
-        await this.managedConversations.trim(MAX_CHATGPT_BROWSER_TABS - this.activeRuns.size);
+        await this.managedConversations.trim(MAX_RETAINED_CHATGPT_TABS);
         if (retained && (retained.isClosed()
           || !retained.url().startsWith("https://chatgpt.com/")
           || !await retained.locator(CHATGPT_ASSISTANT_TURN_SELECTOR).count())) {
@@ -5499,8 +5549,9 @@ export class ChatGptBrowserWorker {
           turn.traceId,
           `${stagePrefix}send`,
           // A multipart commit lands on a conversation already carrying every staged part, so it
-          // needs the same acceptance headroom the stages themselves get.
-          prepared.multipart ? browserStageTimeouts.multipartStageSend : browserStageTimeouts.send,
+          // needs the same acceptance headroom the stages themselves get. An inline prompt is
+          // accepted inline, but its budget still grows with the payload it has to carry.
+          prepared.multipart ? browserStageTimeouts.multipartStageSend : chatGptSendBudgetMs(maxMessageChars),
           (stageSignal) => this.sendAttachedPrompt(
             page,
             submissionBaseline,

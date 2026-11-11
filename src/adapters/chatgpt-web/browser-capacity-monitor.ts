@@ -16,6 +16,12 @@ export class BrowserAdmissionCapacityMonitor {
     private readonly sample: () => BrowserCapacitySample | null,
     private readonly intervalMs = 10_000,
     private readonly clock: () => number = Date.now,
+    /**
+     * Called whenever a sample reports host memory pressure. Idle retained conversation tabs are
+     * pure cache, so the owner can release them instead of letting them compete with running
+     * turns for a shrinking memory budget.
+     */
+    private readonly onMemoryPressure?: () => void,
   ) {
     if (!Number.isSafeInteger(intervalMs) || intervalMs < 1) {
       throw new Error("Invalid browser resource sampling interval");
@@ -34,6 +40,13 @@ export class BrowserAdmissionCapacityMonitor {
     const previous = this.admission.snapshot().capacity;
     const capacity = this.controller.update(sample, this.clock());
     this.admission.setCapacity(capacity);
+    if (this.controller.pressureState().reason === "memory") {
+      try {
+        this.onMemoryPressure?.();
+      } catch {
+        // Cache eviction is best effort; a failure must not break admission sampling.
+      }
+    }
     if (capacity !== previous) {
       const pressure = this.controller.pressureState();
       const mb = (bytes: number | undefined): string => bytes === undefined

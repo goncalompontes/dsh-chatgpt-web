@@ -13,6 +13,7 @@ import { ChatGptBrowserAdmission } from "./browser-admission";
 import { BrowserAdmissionCapacityMonitor } from "./browser-capacity-monitor";
 import { BrowserCapacityController, type BrowserCapacitySample } from "./browser-capacity";
 import { BrowserWorkloadSampler } from "./browser-workload";
+import { trimIdleChatGptConversations } from "./browser-worker";
 import type { ChatGptExternalTurnProgress } from "./turn-progress";
 
 function awaitWithAbort<T>(promise: Promise<T>, signal?: AbortSignal): Promise<T> {
@@ -549,10 +550,16 @@ export class ChatGptTurnSessions {
     private readonly ttlMs = 30 * 60_000,
     private readonly maxEntries = 256,
     adaptiveSample?: (active: number) => BrowserCapacitySample | null,
+    onMemoryPressure?: () => void,
   ) {
     if (adaptiveSample) {
       this.capacityMonitor = new BrowserAdmissionCapacityMonitor(
-        this.admission, new BrowserCapacityController(), () => adaptiveSample(this.admission.snapshot().active),
+        this.admission,
+        new BrowserCapacityController(),
+        () => adaptiveSample(this.admission.snapshot().active),
+        undefined,
+        undefined,
+        onMemoryPressure,
       );
     }
   }
@@ -1112,4 +1119,17 @@ export class ChatGptTurnSessions {
 // Keep tests and auxiliary registries deterministic; only the production singleton
 // samples host pressure. Workers independently enforce the shared configured ceiling.
 const browserWorkloadSampler = new BrowserWorkloadSampler();
-export const chatGptTurnSessions = new ChatGptTurnSessions(undefined, undefined, active => browserWorkloadSampler.sample(active));
+export const chatGptTurnSessions = new ChatGptTurnSessions(
+  undefined,
+  undefined,
+  active => browserWorkloadSampler.sample(active),
+  // Host memory pressure releases idle retained conversation tabs before more admissions queue.
+  () => {
+    void trimIdleChatGptConversations(0).catch(error => {
+      console.warn(
+        `[chatgpt-web] failed to release idle retained tabs under memory pressure:`
+        + ` ${error instanceof Error ? error.message : String(error)}`,
+      );
+    });
+  },
+);

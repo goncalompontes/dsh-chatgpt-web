@@ -80,4 +80,38 @@ describe("adaptive admission monitor", () => {
       monitor.stop();
     }
   });
+
+  test("host memory pressure releases idle retained tabs but CPU pressure does not", () => {
+    const admission = new ChatGptBrowserAdmission(5);
+    let current = healthy;
+    let evictions = 0;
+    const monitor = new BrowserAdmissionCapacityMonitor(
+      admission, new BrowserCapacityController(limits, 1, 0), () => current, 60_000,
+      undefined, () => { evictions += 1; },
+    );
+    try {
+      monitor.start();
+      expect(evictions).toBe(0);
+      current = constrained;
+      monitor.observe();
+      expect(evictions).toBe(1);
+      // CPU pressure only withholds admissions; the retained cache is not the cause.
+      current = { availableMemoryBytes: 64 * GiB, cpuCount: 32, loadAverageOneMinute: 30 };
+      monitor.observe();
+      expect(evictions).toBe(1);
+      // A failing eviction must not break admission sampling.
+      current = constrained;
+      const throwing = new BrowserAdmissionCapacityMonitor(
+        admission, new BrowserCapacityController(limits, 1, 0), () => current, 60_000,
+        undefined, () => { throw new Error("close failed"); },
+      );
+      try {
+        expect(() => throwing.observe()).not.toThrow();
+      } finally {
+        throwing.stop();
+      }
+    } finally {
+      monitor.stop();
+    }
+  });
 });
