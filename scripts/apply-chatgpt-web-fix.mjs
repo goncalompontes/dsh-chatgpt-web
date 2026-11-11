@@ -6,41 +6,43 @@
  * that work into production:
  *
  *   1. take an exclusive lock (one apply at a time),
- *   2. build the integration tree in a dedicated worktree: current `fork/main` + the fix branch,
- *   3. prove it with `bun run typecheck` and `bun test` on that merged tree,
- *   4. push it to `main` (fast-forward or merge commit),
- *   5. rebuild `lib/` from the merged source,
- *   6. deploy only when the sidecar has no active or queued turn and the deployment checkout has no
- *      uncommitted source changes: copy the bundle, restart the sidecar through the stack
- *      supervisor, and wait for health.
+ *   2. merge the branch onto current `fork/main` in a throwaway build worktree,
+ *   3. prove the merged tree with `bun run typecheck` and `bun test`,
+ *   4. push it to `main`,
+ *   5. update the dedicated deployment worktree (a clean checkout the stack runs from) and rebuild
+ *      its bundle,
+ *   6. restart the sidecar through the stack supervisor only when it has no active or queued turn,
+ *      then wait for health.
  *
  * There is no code hot reload in the sidecar (only config hot reload), so "reload" means an idle
- * restart. A busy host or a dirty source checkout defers the deploy instead of breaking work.
+ * restart. A busy host defers the restart instead of breaking work. Deployment never touches the
+ * developer checkout, so uncommitted work there is never overwritten.
  *
  * Usage:
  *   node apply-chatgpt-web-fix.mjs --branch <ref> [--no-deploy] [--repo <path>]
  *
- * Env overrides: APPLY_REPO, APPLY_BUILD_DIR, APPLY_REMOTE, APPLY_HEALTH, APPLY_STACK,
- *                APPLY_DEPLOY_LIB (default <repo>/lib), APPLY_IDLE_TIMEOUT_SECONDS.
+ * Env overrides: APPLY_REPO (git repo used for merging), APPLY_BUILD_DIR (throwaway build
+ * worktree), APPLY_APP_DIR (deployment worktree the stack sidecar runs from), APPLY_REMOTE,
+ * APPLY_HEALTH, APPLY_STACK, APPLY_IDLE_TIMEOUT_SECONDS, APPLY_BUN.
  */
 
 import { execFileSync } from "node:child_process";
 import {
-  closeSync, copyFileSync, existsSync, mkdirSync, openSync, readFileSync, renameSync, rmSync,
-  statSync, writeFileSync,
+  closeSync, existsSync, mkdirSync, openSync, readFileSync, rmSync, statSync, writeFileSync,
 } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
 const HOME = homedir();
 const args = parseArgs(process.argv.slice(2));
+const REPO = args.repo ?? process.env.APPLY_REPO ?? join(HOME, "projects/dsh-chatgpt-web");
 const CONFIG = {
-  repo: args.repo ?? process.env.APPLY_REPO ?? join(HOME, "projects/dsh-chatgpt-web"),
+  repo: REPO,
   buildDir: process.env.APPLY_BUILD_DIR ?? join(HOME, ".dsh/storages/chatgpt-web/deploy-build"),
+  appDir: process.env.APPLY_APP_DIR ?? join(HOME, ".local/share/dsh-web-stack/app"),
   remote: process.env.APPLY_REMOTE ?? "fork",
   healthUrl: process.env.APPLY_HEALTH ?? "http://127.0.0.1:17841/healthz",
   stack: process.env.APPLY_STACK ?? "dsh-web-stack",
-  deployLib: process.env.APPLY_DEPLOY_LIB ?? join(args.repo ?? process.env.APPLY_REPO ?? join(HOME, "projects/dsh-chatgpt-web"), "lib"),
   idleTimeoutSeconds: Number(process.env.APPLY_IDLE_TIMEOUT_SECONDS ?? 120),
   bun: process.env.APPLY_BUN ?? "bun",
 };
@@ -94,15 +96,19 @@ function acquireLock() {
   return undefined;
 }
 
+/** Ensure `dir` is a worktree of the repository, creating it detached at `ref` when missing. */
+function ensureWorktree(dir, ref) {
+  mkdirSync(dir, { recursive: true });
+  const registered = git(CONFIG.repo, "worktree", "list", "--porcelain").includes(`worktree ${dir}`);
+  if (!registered && existsSync(join(dir, ".git"))) {
+    throw new Error(`Directory exists but is not a worktree of ${CONFIG.repo}: ${dir}`);
+  }
+  if (!registered) git(CONFIG.repo, "worktree", "add", "--detach", dir, ref);
+  return registered;
+}
+
 function prepareBuildWorktree(branch) {
-  mkdirSync(CONFIG.buildDir, { recursive: true });
-  const registered = git(CONFIG.repo, "worktree", "list", "--porcelain").includes(`worktree ${CONFIG.buildDir}`);
-  if (!registered && existsSync(join(CONFIG.buildDir, ".git"))) {
-    throw new Error(`Build directory exists but is not a worktree of ${CONFIG.repo}: ${CONFIG.buildDir}`);
-  }
-  if (!registered) {
-    git(CONFIG.repo, "worktree", "add", "--detach", CONFIG.buildDir, `${CONFIG.remote}/main`);
-  }
+  ensureWorktree(CONFIG.buildDir, `${CONFIG.remote}/main`);
   git(CONFIG.buildDir, "fetch", CONFIG.remote, "--prune");
   git(CONFIG.buildDir, "checkout", "--detach", "--force", `${CONFIG.remote}/main`);
   git(CONFIG.buildDir, "reset", "--hard", `${CONFIG.remote}/main`);
@@ -120,6 +126,27 @@ function verify() {
   run(CONFIG.buildDir, CONFIG.bun, ["run", "typecheck"]);
   log("tests");
   run(CONFIG.buildDir, CONFIG.bun, ["test"]);
+}
+
+/**
+ * Move the deployment worktree to the merged commit and rebuild its bundle. This tree is what the
+ * stack launches, so it is kept clean and never shares a checkout with developer edits.
+ */
+function prepareDeployApp(head) {
+  ensureWorktree(CONFIG.appDir, head);
+  git(CONFIG.appDir, "fetch", CONFIG.remote, "--prune");
+  git(CONFIG.appDir, "checkout", "--detach", "--force", head);
+  git(CONFIG.appDir, "reset", "--hard", head);
+  git(CONFIG.appDir, "clean", "-fd", "-e", "node_modules");
+  if (!existsSync(join(CONFIG.appDir, "node_modules"))) {
+    log("installing dependencies in the deployment worktree");
+    run(CONFIG.appDir, CONFIG.bun, ["install", "--prefer-offline"]);
+  }
+  log("building the deployment bundle");
+  run(CONFIG.appDir, CONFIG.bun, ["run", "build"]);
+  if (!existsSync(join(CONFIG.appDir, "lib", "cli.js"))) {
+    throw new Error(`Build did not produce ${join(CONFIG.appDir, "lib", "cli.js")}`);
+  }
 }
 
 async function health() {
@@ -148,24 +175,6 @@ async function waitForIdle(timeoutMs) {
     if (status && idle(status)) return status;
     if (Date.now() >= deadline) return undefined;
     await new Promise(resolve => setTimeout(resolve, 2_000));
-  }
-}
-
-function deployCheckoutIsClean() {
-  // Only source inputs must be clean; lib/ is the build output this script owns.
-  const dirty = git(CONFIG.repo, "status", "--porcelain", "--", "src", "package.json", "bun.lock", "tsconfig.json");
-  return dirty.length === 0;
-}
-
-function installBundle() {
-  mkdirSync(CONFIG.deployLib, { recursive: true });
-  for (const file of ["cli.js", "plugin.js"]) {
-    const source = join(CONFIG.buildDir, "lib", file);
-    const target = join(CONFIG.deployLib, file);
-    if (!existsSync(source)) throw new Error(`Build did not produce ${source}`);
-    const temporary = `${target}.apply-${process.pid}`;
-    copyFileSync(source, temporary);
-    renameSync(temporary, target);
   }
 }
 
@@ -200,16 +209,12 @@ async function main() {
   const release = acquireLock();
   if (!release) result({ ok: false, error: "another apply is running" }, 1);
   let mergedHead;
-  let buildReady = false;
   try {
     prepareBuildWorktree(args.branch);
     verify();
     mergedHead = git(CONFIG.buildDir, "rev-parse", "HEAD");
     log(`pushing ${mergedHead} to ${CONFIG.remote} main`);
     git(CONFIG.buildDir, "push", CONFIG.remote, `HEAD:main`);
-    log("building bundle");
-    run(CONFIG.buildDir, CONFIG.bun, ["run", "build"]);
-    buildReady = true;
   } catch (error) {
     release();
     result({
@@ -220,37 +225,44 @@ async function main() {
     }, 1);
   }
 
-  const summary = { ok: true, branch: args.branch, merged: true, head: mergedHead, pushed: true, built: buildReady };
+  const summary = { ok: true, branch: args.branch, merged: true, head: mergedHead, pushed: true };
   if (args.deploy === false) {
     release();
-    result({ ...summary, deployed: false, reason: "--no-deploy" });
+    result({ ...summary, deployed: false, built: false, reason: "--no-deploy" });
   }
-  if (!deployCheckoutIsClean()) {
+
+  try {
+    prepareDeployApp(mergedHead);
+  } catch (error) {
     release();
     result({
-      ...summary, deployed: false,
-      reason: `deployment checkout has uncommitted source changes in ${CONFIG.repo}; merged, pushed and built, restart deferred`,
-    });
+      ...summary, deployed: false, built: false,
+      error: error instanceof Error ? error.message : String(error),
+      reason: "merged into main, but the deployment worktree could not be updated; the running sidecar is untouched",
+    }, 1);
   }
+
   const status = await waitForIdle(CONFIG.idleTimeoutSeconds * 1_000);
   if (!status) {
     release();
     result({
-      ...summary, deployed: false,
-      reason: `sidecar stayed busy for ${CONFIG.idleTimeoutSeconds}s; merged, pushed and built, restart deferred`,
+      ...summary, deployed: false, built: true,
+      reason: `sidecar stayed busy for ${CONFIG.idleTimeoutSeconds}s; merged, pushed and built into the deployment worktree, restart deferred`,
     });
   }
   try {
-    installBundle();
     const next = await deploy(status);
     release();
-    result({ ...summary, deployed: true, sidecar: { previousPid: status.pid, pid: next.pid, healthz: CONFIG.healthUrl } });
+    result({
+      ...summary, deployed: true, built: true,
+      sidecar: { previousPid: status.pid, pid: next.pid, healthz: CONFIG.healthUrl, appDir: CONFIG.appDir },
+    });
   } catch (error) {
     release();
     result({
-      ...summary, deployed: false,
+      ...summary, deployed: false, built: true,
       error: error instanceof Error ? error.message : String(error),
-      reason: `merged into main, but the restart failed after the bundle was copied; inspect the sidecar log`,
+      reason: "merged into main and built into the deployment worktree, but the restart failed; inspect the sidecar log",
     }, 1);
   }
 }
