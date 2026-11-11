@@ -1139,7 +1139,11 @@ export function assertChatGptWebInputWithinLimits(
       { status: 400, errorType: "invalid_request_error", code: "context_length_exceeded", retryable: false },
     );
   }
-  const { contextWindow } = resolveChatGptWebContextLimits(modelId, effort, capabilities);
+  const { contextWindow, autoCompactTokenLimit } = resolveChatGptWebContextLimits(
+    modelId,
+    effort,
+    capabilities,
+  );
   const { browserMessageTokenLimit, browserComposerCharLimit } = resolveChatGptWebTransportLimits(
     modelId,
     effort,
@@ -1161,6 +1165,19 @@ export function assertChatGptWebInputWithinLimits(
   if (browserMessageTokenLimit !== undefined && estimatedMessageTokens > browserMessageTokenLimit) {
     throw new ChatGptWebAdapterError(
       `This prompt requires ${estimatedMessageTokens.toLocaleString("en-US")} visible message tokens, which exceeds the measured ${browserMessageTokenLimit.toLocaleString("en-US")}-token ChatGPT browser message boundary for this account and effort. The bridge keeps older conversation history in the retained chat, so only this turn's own payload must fit one browser message.`,
+      { status: 400, errorType: "invalid_request_error", code: "context_length_exceeded", retryable: false },
+    );
+  }
+  // Routes without a separately measured one-message boundary are gated by the compaction
+  // threshold, which already excludes the fixed headroom ChatGPT keeps for its own platform
+  // prompt. The transport window alone is not a safe submission gate: a 40,765-token Instant
+  // submission passed the 41,000-token window check and ChatGPT still rejected it as too long,
+  // because the real compiler/tokenizer output exceeded the remaining margin. Anything above the
+  // compaction threshold must be compacted or trimmed before it is submitted, not diagnosed
+  // afterwards.
+  if (browserMessageTokenLimit === undefined && estimatedInputTokens > autoCompactTokenLimit) {
+    throw new ChatGptWebAdapterError(
+      `This turn is estimated at ${estimatedInputTokens.toLocaleString("en-US")} input tokens, which exceeds the ${autoCompactTokenLimit.toLocaleString("en-US")}-token ChatGPT Web submission boundary for this account and effort. The remaining browser window is reserved for ChatGPT's own platform prompt, so older history must be compacted or omitted before this turn can be submitted.`,
       { status: 400, errorType: "invalid_request_error", code: "context_length_exceeded", retryable: false },
     );
   }
@@ -1305,27 +1322,6 @@ export const browserStageTimeouts = {
   multipartStageSend: 180_000,
 } as const;
 
-/** Ceiling for one inline submission, aligned with the multipart stage budget. */
-export const CHATGPT_SEND_BUDGET_MAX_MS = 180_000;
-/**
- * Submission-acceptance growth per visible prompt character.
- *
- * The flat `send` stage budget only ever covered the click plus a small prompt's echo. ChatGPT has
- * to render and ingest the whole prompt before it can render the user turn, so a turn carrying
- * ~133k characters (~40k estimated tokens) outlived the 20 s floor with only two tabs active; the
- * stage timeout then surfaced as an ambiguous submission. Grow the budget with the payload while
- * keeping a bounded ceiling so a genuinely stuck send still fails.
- */
-export const CHATGPT_SEND_BUDGET_PER_CHAR_MS = 0.5;
-
-export function chatGptSendBudgetMs(maxChars: number): number {
-  const chars = Number.isFinite(maxChars) && maxChars > 0 ? maxChars : 0;
-  return Math.min(
-    CHATGPT_SEND_BUDGET_MAX_MS,
-    Math.max(browserStageTimeouts.send, Math.ceil(chars * CHATGPT_SEND_BUDGET_PER_CHAR_MS)),
-  );
-}
-
 /** Bounded preparation attempts; each retry waits with exponential backoff before reloading. */
 export const CHATGPT_TEMPORARY_CHAT_PREPARATION_ATTEMPTS = 3;
 /** Bounded retries for a pre-submission ChatGPT limit (HTTP 429 / rate-limit dialog). */
@@ -1421,6 +1417,17 @@ export class ChatGptBrowserObservationTimeoutError extends Error {
   constructor(timeoutMs: number) {
     super(`ChatGPT browser DOM observation did not respond within ${timeoutMs}ms`);
     this.name = "ChatGptBrowserObservationTimeoutError";
+  }
+}
+
+/**
+ * One browser stage exceeded its budget. The stage may still be running, so callers that own an
+ * irreversible action (a submission) must settle its real outcome rather than infer one.
+ */
+export class ChatGptBrowserStageTimeoutError extends Error {
+  constructor(readonly stage: string, readonly timeoutMs: number) {
+    super(`ChatGPT browser stage timed out: ${stage}`);
+    this.name = "ChatGptBrowserStageTimeoutError";
   }
 }
 
@@ -1602,7 +1609,16 @@ export function chatGptTurnIsComplete(state: {
     && state.completionActionVisible;
 }
 
-export type ChatGptSubmissionEvidence = "user_turn" | "assistant_turn" | "generation_running" | "mcp_tool_call";
+export type ChatGptSubmissionEvidence =
+  | "user_turn"
+  | "assistant_turn"
+  | "generation_running"
+  | "mcp_tool_call"
+  /**
+   * The composer emptied after Enter without a rejection alert. That is ChatGPT's own acceptance
+   * signal; the user/assistant nodes may simply not be rendered yet while the payload is ingested.
+   */
+  | "composer_cleared";
 
 export function chatGptSubmissionEvidence(state: {
   initialUserTurnCount: number;
@@ -1615,6 +1631,42 @@ export function chatGptSubmissionEvidence(state: {
   if (state.assistantTurnCount > state.initialAssistantTurnCount) return "assistant_turn";
   if (state.generationRunning) return "generation_running";
   return undefined;
+}
+
+export type ChatGptActivatedSubmissionSettlement =
+  | { kind: "accepted"; evidence: ChatGptSubmissionEvidence }
+  | { kind: "not_submitted" }
+  | { kind: "unknown" };
+
+const composerComparisonText = (text: string): string =>
+  text.replace(/[\u200b\ufeff]/g, "").replace(/\s+/g, " ").trim();
+
+/**
+ * Resolve what a pressed send button actually did.
+ *
+ * Enter is irreversible, so a stage budget expiring after activation is not evidence that nothing
+ * was submitted; it only means the adapter has to look instead of guessing. Submission DOM
+ * evidence proves acceptance. The one state that proves the opposite is the composer still holding
+ * the submitted prompt: the payload never left the page, so a retry cannot duplicate it. Everything
+ * else stays unknown and keeps the existing ambiguous classification.
+ */
+export function chatGptActivatedSubmissionSettlement(input: {
+  evidence?: ChatGptSubmissionEvidence;
+  composerText?: string;
+  submittedPromptText?: string;
+}): ChatGptActivatedSubmissionSettlement {
+  if (input.evidence) return { kind: "accepted", evidence: input.evidence };
+  const expected = composerComparisonText(input.submittedPromptText ?? "");
+  const remaining = composerComparisonText(input.composerText ?? "");
+  if (expected.length === 0) return { kind: "unknown" };
+  // ChatGPT may re-render the composer while the click is being processed, so compare a stable
+  // tail rather than the whole payload; the exact prompt is the only text that can be there.
+  if (remaining.endsWith(expected.slice(-240))) return { kind: "not_submitted" };
+  // Enter moved the prompt out of the input and no rejection alert replaced it: the submission was
+  // accepted and is still being ingested. Treating that as "unknown" is what produced misleading
+  // ambiguous-submission failures for large prompts.
+  if (remaining.length === 0) return { kind: "accepted", evidence: "composer_cleared" };
+  return { kind: "unknown" };
 }
 
 export type ChatGptConnectorAttachmentMode = "none" | "mention" | "retained";
@@ -2638,7 +2690,7 @@ export class ChatGptBrowserWorker {
           }
           stageTimedOut = true;
           controller.abort();
-          rejectTimeout(new Error(`ChatGPT browser stage timed out: ${stage}`));
+          rejectTimeout(new ChatGptBrowserStageTimeoutError(stage, timeoutMs));
         };
         timer = setTimeout(fireOrRearm, timeoutMs);
       });
@@ -4232,6 +4284,52 @@ export class ChatGptBrowserWorker {
     return evidence;
   }
 
+  /**
+   * Resolve a submission whose stage budget expired after Enter was pressed. Running turns are
+   * never inspected here; this only reads the page and classifies what the click produced.
+   */
+  private async settleActivatedSubmission(
+    page: Page,
+    baseline: ChatGptSubmissionBaseline,
+    callerSignal?: AbortSignal,
+  ): Promise<ChatGptSubmissionEvidence | undefined> {
+    if (page.isClosed() || callerSignal?.aborted) return undefined;
+    // A submission rejection the browser rendered is definitive (for example the composer
+    // overflow alert); surface it rather than guessing from an empty or unchanged DOM.
+    await throwIfChatGptSubmissionErrorAlert(page);
+    let evidence: ChatGptSubmissionEvidence | undefined;
+    try {
+      evidence = await withChatGptBrowserObservationTimeout(
+        this.currentSubmissionEvidence(page, baseline),
+      );
+    } catch {
+      evidence = undefined;
+    }
+    const settlement = chatGptActivatedSubmissionSettlement({
+      evidence,
+      composerText: await this.readComposerText(page),
+      submittedPromptText: baseline.submittedPromptText,
+    });
+    if (settlement.kind === "accepted") return settlement.evidence;
+    if (settlement.kind === "not_submitted") {
+      throw new ChatGptWebAdapterError(
+        "ChatGPT did not act on the send keypress; the prompt is still in the composer, so nothing was submitted. Retry the turn.",
+        { status: 503, errorType: "server_error", code: "chatgpt_prompt_not_submitted", retryable: true },
+      );
+    }
+    return undefined;
+  }
+
+  /** Best-effort composer text read used only to settle a submission outcome. */
+  private async readComposerText(page: Page): Promise<string> {
+    try {
+      const composer = await this.activeComposer(page, 5_000);
+      return (await composer.evaluate(element => element.textContent ?? "")) ?? "";
+    } catch {
+      return "";
+    }
+  }
+
   private async waitForMultipartAcknowledgement(
     page: Page,
     initialResponseTurn: ChatGptAssistantTurnBinding,
@@ -5545,30 +5643,59 @@ export class ChatGptBrowserWorker {
         );
         await diagnostics.capture(page, `${stagePrefix}file-attachment-complete`);
         submissionBaseline.submittedPromptText = finalPrompt;
-        const finalSubmissionEvidence = await this.runStage(
-          turn.traceId,
-          `${stagePrefix}send`,
-          // A multipart commit lands on a conversation already carrying every staged part, so it
-          // needs the same acceptance headroom the stages themselves get. An inline prompt is
-          // accepted inline, but its budget still grows with the payload it has to carry.
-          prepared.multipart ? browserStageTimeouts.multipartStageSend : chatGptSendBudgetMs(maxMessageChars),
-          (stageSignal) => this.sendAttachedPrompt(
-            page,
-            submissionBaseline,
-            checkpoint => diagnostics.capture(page, checkpoint),
-            turn.abortSignal ? AbortSignal.any([stageSignal, turn.abortSignal]) : stageSignal,
-            turn.externalProgress,
-            turn,
-            completionTracker,
-            toolTurnObservationRecovery
-              ? async (...args) => {
-                const recovered = await recoverSubmissionObservation(...args);
-                submissionBaseline = recovered.baseline;
-                return recovered;
-              }
-              : undefined,
-          ),
-        );
+        const sendStage = `${stagePrefix}send`;
+        let sendActivated = false;
+        let finalSubmissionEvidence: ChatGptSubmissionEvidence;
+        try {
+          finalSubmissionEvidence = await this.runStage(
+            turn.traceId,
+            sendStage,
+            // A multipart commit lands on a conversation already carrying every staged part, so it
+            // needs the same acceptance headroom the stages themselves get.
+            prepared.multipart ? browserStageTimeouts.multipartStageSend : browserStageTimeouts.send,
+            (stageSignal) => this.sendAttachedPrompt(
+              page,
+              submissionBaseline,
+              checkpoint => diagnostics.capture(page, checkpoint),
+              turn.abortSignal ? AbortSignal.any([stageSignal, turn.abortSignal]) : stageSignal,
+              turn.externalProgress,
+              {
+                onSendActivated: () => {
+                  sendActivated = true;
+                  return turn.onSendActivated?.();
+                },
+                onSubmitted: () => turn.onSubmitted?.(),
+              },
+              completionTracker,
+              toolTurnObservationRecovery
+                ? async (...args) => {
+                  const recovered = await recoverSubmissionObservation(...args);
+                  submissionBaseline = recovered.baseline;
+                  return recovered;
+                }
+                : undefined,
+            ),
+          );
+        } catch (error) {
+          // Enter was already pressed, so a stage budget expiring is not evidence that nothing
+          // was submitted. Settle the browser's real outcome instead of handing the caller an
+          // unknowable submission state.
+          if (!(error instanceof ChatGptBrowserStageTimeoutError)
+            || error.stage !== sendStage
+            || !sendActivated
+            || turn.abortSignal?.aborted) {
+            throw error;
+          }
+          await diagnostics.capture(page, `${stagePrefix}send-settlement`);
+          const settled = await this.settleActivatedSubmission(page, submissionBaseline, turn.abortSignal);
+          if (!settled) throw error;
+          console.warn(
+            `[chatgpt-web] browser turn ${turn.traceId} submission settled after the send budget expired`
+            + ` evidence=${settled}`,
+          );
+          finalSubmissionEvidence = settled;
+          turn.onSubmitted?.();
+        }
         console.info(`[chatgpt-web] browser turn ${turn.traceId} submission accepted evidence=${finalSubmissionEvidence}`);
         const responseTurn = await this.waitForNewAssistantTurn(
           page,
