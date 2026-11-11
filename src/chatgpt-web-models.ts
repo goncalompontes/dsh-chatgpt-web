@@ -51,6 +51,21 @@ export const CHATGPT_WEB_MEDIUM_HIGH_CONTEXT_WINDOW = 90_000;
 export const CHATGPT_WEB_MEDIUM_HIGH_AUTO_COMPACT_TOKEN_LIMIT = 80_000;
 export const CHATGPT_WEB_INSTANT_COMPOSER_CHAR_LIMIT = 211_256;
 export const CHATGPT_WEB_MEDIUM_HIGH_COMPOSER_CHAR_LIMIT = 1_048_572;
+/**
+ * Measured Plus single-message acceptance boundary for the Sol/GPT-6 Medium and High routes.
+ *
+ * The composer accepting text and ChatGPT accepting one message are different surfaces. The larger
+ * "composer" constants above describe how much text the editor will hold; they do not prove that
+ * ChatGPT will answer it. In the live 2026-11-11 sidecar run (Plus account, effort High) the last
+ * accepted temporary-chat submission carried 36,867 visible message tokens (45,059 estimated input
+ * tokens with the 8,192-token platform reserve, 115,320 submitted characters). The first rejected
+ * one carried 43,155 visible message tokens (51,347 estimated, 145,551 characters): ChatGPT
+ * remounted the temporary chat and rendered "The message you submitted was too long, please edit
+ * it and resubmit." 40,000 keeps every observed accepted payload and rejects the observed rejected
+ * one before it reaches the composer. The 90,000-token value is the route's model context window,
+ * not the size of a single browser message.
+ */
+export const CHATGPT_WEB_PLUS_MEDIUM_HIGH_MESSAGE_TOKEN_LIMIT = 40_000;
 /** Hidden ChatGPT product prompt and Codex Native schema reserve included in usage estimates. */
 export const CHATGPT_WEB_PLATFORM_RESERVE_TOKENS = 8_192;
 /** Pro-account usable browser windows and separately measured one-message boundaries. */
@@ -211,7 +226,10 @@ export function resolveChatGptWebTransportLimits(
       return { browserComposerCharLimit: CHATGPT_WEB_INSTANT_COMPOSER_CHAR_LIMIT };
     }
     if (effort === "medium" || effort === "high") {
-      return { browserComposerCharLimit: CHATGPT_WEB_MEDIUM_HIGH_COMPOSER_CHAR_LIMIT };
+      return {
+        browserMessageTokenLimit: CHATGPT_WEB_PLUS_MEDIUM_HIGH_MESSAGE_TOKEN_LIMIT,
+        browserComposerCharLimit: CHATGPT_WEB_MEDIUM_HIGH_COMPOSER_CHAR_LIMIT,
+      };
     }
     throw new Error(`ChatGPT Plus transport limit is not defined for unavailable effort: ${effort}`);
   }

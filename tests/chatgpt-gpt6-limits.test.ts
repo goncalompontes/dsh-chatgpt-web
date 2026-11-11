@@ -33,18 +33,29 @@ test("GPT-6 still enforces the Sol-class context window", () => {
     .toThrow(/exceeds the/);
 });
 
-test("a submission above the route's compaction threshold never reaches the browser", () => {
-  // Observed failure: a 40,765-token Instant submission passed the 41,000-token transport window
-  // check and ChatGPT still rejected it as "too long", because the remaining margin belonged to
-  // ChatGPT's own platform prompt. The compaction threshold is the boundary that leaves headroom.
+test("a submission above the route's measured one-message boundary never reaches the browser", () => {
+  // Observed Instant failure: a 40,765-token Instant submission passed the 41,000-token transport
+  // window check and ChatGPT still rejected it as "too long", because the remaining margin belonged
+  // to ChatGPT's own platform prompt. The compaction threshold is the boundary that leaves headroom.
   expect(() => assertChatGptWebInputWithinLimits(40_765, 40_765, "gpt-6", "low", plusCapabilities, 133_403))
     .toThrow(/32,000-token ChatGPT Web submission boundary/);
   expect(() => assertChatGptWebInputWithinLimits(32_000, 32_000, "gpt-6", "low", plusCapabilities, 100_000))
     .not.toThrow();
-  expect(() => assertChatGptWebInputWithinLimits(80_001, 80_001, "gpt-6", "high", plusCapabilities, 200_000))
-    .toThrow(/80,000-token ChatGPT Web submission boundary/);
-  expect(() => assertChatGptWebInputWithinLimits(80_000, 80_000, "gpt-6", "high", plusCapabilities, 200_000))
+
+  // Live 2026-11-11 Temporary Chat evidence on this Plus account (effort High). The accepted
+  // submission (trace 9c61bb446812) carried 36,867 visible message tokens, 45,059 with the platform
+  // reserve, and 115,320 characters. The rejected submission (trace f2781d4b9926) carried 43,155 /
+  // 51,347 / 145,551 and ChatGPT remounted the chat with "The message you submitted was too long".
+  // The route's 90,000-token value is its model context window, not the size of one browser message,
+  // so the old preflight let both payloads reach the composer.
+  expect(() => assertChatGptWebInputWithinLimits(45_059, 36_867, "gpt-6", "high", plusCapabilities, 115_320))
     .not.toThrow();
+  expect(() => assertChatGptWebInputWithinLimits(51_347, 43_155, "gpt-6", "high", plusCapabilities, 145_551))
+    .toThrow(/40,000-token ChatGPT browser message boundary/);
+  expect(() => assertChatGptWebInputWithinLimits(51_415, 43_223, "gpt-5.6-sol", "high", plusCapabilities, 145_766))
+    .toThrow(/40,000-token ChatGPT browser message boundary/);
+  expect(() => assertChatGptWebInputWithinLimits(51_415, 43_223, "gpt-6", "medium", plusCapabilities, 145_766))
+    .toThrow(/40,000-token ChatGPT browser message boundary/);
 });
 
 test("unknown models are still rejected", () => {
