@@ -203,7 +203,7 @@ function briefFor(detection, contextLines) {
   return [
     "A chatgpt-web provider error was detected automatically from the live adapter log. Fix the cause, not the symptom.",
     "",
-    "Before anything else: archive this thread so it stays out of the user's thread list. Call the t3_thread_organize tool with action \"archive\" and no threadId (it defaults to this thread). Archiving does not interrupt the run; continue the work afterwards.",
+    "Before anything else: hide this thread from the user's thread list without interrupting it. Call the t3_thread_organize tool with action \"snooze\" and snoozedUntil set to an ISO timestamp about ten years from now (for example new Date(Date.now() + 315_360_000_000).toISOString()). Never archive this thread: archiving stops the run immediately. Snoozing does not.",
     "",
     `Observed error: ${detection.cause}`,
     `Adapter stage: ${detection.stage ?? "unknown"}`,
@@ -220,8 +220,9 @@ function briefFor(detection, contextLines) {
     "2. Change WHY it fails. Widening a timeout, adding a retry, adding a fallback, catching and downgrading or reclassifying an error, or letting a turn pass with a weaker check is a side-step and is rejected. If a limit or timeout is genuinely wrong, prove the correct value from measured or observable evidence (ingestion and acceptance rates, upstream behaviour, DOM/network captures) and encode that corrected model, pinned by a boundary test.",
     "3. Prefer correcting the adapter's model of ChatGPT over handling its symptoms: transport limits and staging thresholds, acceptance evidence and state transitions, conversation retention and identity, DOM detection.",
     "4. Add a regression test that fails on the pre-fix code and passes after.",
-    `5. Base the branch on ${CONFIG.worktreeRef} (git log --oneline ${CONFIG.worktreeRef} -1); local main may be stale. Work only in this worktree. Run bun run typecheck and bun test. Do not restart the sidecar or deploy; do not open a PR unless asked.`,
-    "6. If the evidence is insufficient to prove a cause, say what is missing and propose the smallest instrumentation that would prove it. Do not guess and do not paper over.",
+    `5. Base the branch on ${CONFIG.worktreeRef} (git log --oneline ${CONFIG.worktreeRef} -1); local main may be stale. Work only in this worktree. Run bun run typecheck and bun test.`,
+    "6. Commit the verified change on your branch, then apply it exactly once: `node ~/.local/share/dsh-web-stack/apply-chatgpt-web-fix.mjs --branch \"$(git branch --show-current)\"`. The script merges the branch into main, pushes, rebuilds and restarts the idle sidecar when that is safe. Report its JSON result. If it reports a deferred deploy, stop and give its exact reason. Never merge, push, restart or deploy anything yourself.",
+    "7. If the evidence is insufficient to prove a cause, say what is missing and propose the smallest instrumentation that would prove it. Do not guess and do not paper over.",
     "",
     "Report: root cause (with evidence), the fix, the regression test, and anything still unexplained.",
   ];
