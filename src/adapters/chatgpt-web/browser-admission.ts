@@ -7,6 +7,10 @@ export class ChatGptBrowserAdmission {
   private rejected = 0;
   private totalQueueWaitMs = 0;
   private maxQueueWaitMs = 0;
+  /** Fixed-size recent history: avoids retaining one sample per lifetime admission. */
+  private readonly recentQueueWaits: number[] = [];
+  private nextQueueWaitIndex = 0;
+  private static readonly QUEUE_WAIT_WINDOW = 256;
   private readonly pending: Array<{
     resolve: (release: () => void) => void;
     reject: (error: Error) => void;
@@ -64,10 +68,15 @@ export class ChatGptBrowserAdmission {
   }
 
   metrics() {
+    const sortedWaits = [...this.recentQueueWaits].sort((a, b) => a - b);
+    const percentile = (fraction: number) => sortedWaits.length === 0 ? 0
+      : sortedWaits[Math.ceil(sortedWaits.length * fraction) - 1]!;
     return {
       ...this.snapshot(), maxPending: this.maxPending, admitted: this.admitted,
       cancelled: this.cancelled, rejected: this.rejected,
       totalQueueWaitMs: this.totalQueueWaitMs, maxQueueWaitMs: this.maxQueueWaitMs,
+      queueWaitSamples: sortedWaits.length,
+      p50QueueWaitMs: percentile(0.5), p95QueueWaitMs: percentile(0.95), p99QueueWaitMs: percentile(0.99),
       oldestPendingMs: this.pending[0] ? Math.max(0, this.clock() - this.pending[0].queuedAt) : 0,
     };
   }
@@ -95,6 +104,12 @@ export class ChatGptBrowserAdmission {
       const waited = Math.max(0, this.clock() - waiter.queuedAt);
       this.totalQueueWaitMs += waited;
       this.maxQueueWaitMs = Math.max(this.maxQueueWaitMs, waited);
+      if (this.recentQueueWaits.length < ChatGptBrowserAdmission.QUEUE_WAIT_WINDOW) {
+        this.recentQueueWaits.push(waited);
+      } else {
+        this.recentQueueWaits[this.nextQueueWaitIndex] = waited;
+      }
+      this.nextQueueWaitIndex = (this.nextQueueWaitIndex + 1) % ChatGptBrowserAdmission.QUEUE_WAIT_WINDOW;
       waiter.resolve(this.lease());
     }
   }
