@@ -38,6 +38,12 @@ export class ManagedConversationPool<T extends PageHandle> {
   async put(key: string, page: T): Promise<void> {
     await this.release(key);
     if (page.isClosed()) return;
+    // Retention can be disabled entirely on a memory-constrained host; keeping the page would
+    // then leak one full renderer per completed conversation.
+    if (this.maxEntries <= 0) {
+      await page.close();
+      return;
+    }
     while (this.idle.size >= this.maxEntries) await this.release(this.idle.keys().next().value!);
     this.idle.set(key, { page });
   }

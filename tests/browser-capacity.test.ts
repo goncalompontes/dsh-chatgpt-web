@@ -4,7 +4,7 @@ import {
   estimateBrowserCapacity,
   DEFAULT_BROWSER_CAPACITY_LIMITS,
 } from "../src/adapters/chatgpt-web/browser-capacity";
-import { browserTurnCeiling, MAX_CHATGPT_BROWSER_TABS } from "../src/adapters/chatgpt-web/concurrency";
+import { browserTurnCeiling, MAX_CHATGPT_BROWSER_TABS, retainedChatGptTabs } from "../src/adapters/chatgpt-web/concurrency";
 
 const GiB = 1024 ** 3;
 const sample = (memoryGiB: number, load = 1, cpus = 16, activeTurns = 0) =>
@@ -38,6 +38,15 @@ describe("reactive browser admission capacity", () => {
   test("validates the shared configurable physical ceiling", () => {
     expect(browserTurnCeiling('12')).toBe(12);
     for (const value of ['0', '-1', '129', 'Infinity', '4.5', '']) expect(() => browserTurnCeiling(value)).toThrow();
+  });
+
+  test("keeps idle conversation tabs on their own small ceiling", () => {
+    // One retained tab is a full ChatGPT renderer, so retention must not scale with the turn limit.
+    expect(retainedChatGptTabs('', 32)).toBe(2);
+    expect(retainedChatGptTabs('0', 32)).toBe(0);
+    expect(retainedChatGptTabs('4', 32)).toBe(4);
+    expect(retainedChatGptTabs('1', 1)).toBe(1);
+    for (const value of ['-1', '33', '2.5', 'many']) expect(() => retainedChatGptTabs(value, 32)).toThrow();
   });
 
   test("rejects unsafe capacity policy settings", () => {

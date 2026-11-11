@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { chmodSync, existsSync, mkdirSync, readdirSync, rmSync, statSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { basename, join, resolve } from "node:path";
 import { chromium, type Browser, type BrowserContext, type Locator, type Page } from "playwright-core";
 import {
   atomicWriteFile,
@@ -83,7 +83,7 @@ import {
   resolveChatGptWebTransportLimits,
 } from "../../chatgpt-web-models";
 import { LauncherBrowserHelperClient } from "./launcher-helper-client";
-import { MAX_CHATGPT_BROWSER_TABS } from "./concurrency";
+import { MAX_CHATGPT_BROWSER_TABS, MAX_RETAINED_CHATGPT_TABS } from "./concurrency";
 import { chatGptWebBackoffDelayMs, chatGptWebRetryAfterMs, sleep } from "./backoff";
 import {
   ChatGptSurfaceStaleError,
@@ -105,9 +105,20 @@ import type {
   ChatGptTurnProgressReader,
 } from "./turn-progress";
 
-export { MAX_CHATGPT_BROWSER_TABS } from "./concurrency";
+export { MAX_CHATGPT_BROWSER_TABS, MAX_RETAINED_CHATGPT_TABS } from "./concurrency";
 
 const workers = new Map<string, ChatGptBrowserWorker>();
+
+/**
+ * Drop idle retained conversation tabs across every configured worker. Host memory pressure is
+ * the one signal that outranks cache warmth: a retained tab is a full ChatGPT renderer that no
+ * turn is using, so releasing it is always safe and immediately returns its memory.
+ */
+export async function trimIdleChatGptConversations(limit: number): Promise<void> {
+  await Promise.all([...new Set(workers.values())].map(
+    worker => worker.trimRetainedConversations(limit),
+  ));
+}
 
 export async function closeChatGptBrowserWorkers(): Promise<void> {
   const active = [...workers.values()];
@@ -870,13 +881,24 @@ export async function throwIfChatGptTerminalErrorAlert(scope: ChatGptTextScope):
   );
 }
 
+/**
+ * ChatGPT's composer-overflow rejection. The copy is singular when the submission carried a single
+ * message ("The message you submitted was too long, please edit and resubmit.") and plural when it
+ * carried several ("The messages you submitted were too long, please edit them and resubmit."),
+ * so match the invariant sentence shape instead of one exact wording. Missing the singular form
+ * left the alert on screen until the assistant-turn grace expired and the turn failed as
+ * "did not create a response DOM".
+ */
+export const CHATGPT_MESSAGE_TOO_LONG_ALERT =
+  /The messages? you submitted (?:was|were) too long[\s\S]*resubmit/i;
+
 /** Submission failures can replace the assistant node with a sibling alert. */
 export async function throwIfChatGptSubmissionErrorAlert(page: Page): Promise<void> {
   const alerts = page.locator('main [role="alert"]');
-  const overflow = alerts.filter({ hasText: /The messages you submitted were too long[\s\S]*please edit them and resubmit/i }).last();
+  const overflow = alerts.filter({ hasText: CHATGPT_MESSAGE_TOO_LONG_ALERT }).last();
   if (await overflow.isVisible().catch(() => false)) {
     throw new ChatGptWebAdapterError(
-      "ChatGPT rejected the submitted messages as too long. Compact the conversation before retrying.",
+      "ChatGPT rejected the submitted message as too long. Compact the conversation before retrying.",
       { status: 400, errorType: "invalid_request_error", code: "context_length_exceeded", retryable: false },
     );
   }
@@ -1117,7 +1139,11 @@ export function assertChatGptWebInputWithinLimits(
       { status: 400, errorType: "invalid_request_error", code: "context_length_exceeded", retryable: false },
     );
   }
-  const { contextWindow } = resolveChatGptWebContextLimits(modelId, effort, capabilities);
+  const { contextWindow, autoCompactTokenLimit } = resolveChatGptWebContextLimits(
+    modelId,
+    effort,
+    capabilities,
+  );
   const { browserMessageTokenLimit, browserComposerCharLimit } = resolveChatGptWebTransportLimits(
     modelId,
     effort,
@@ -1139,6 +1165,19 @@ export function assertChatGptWebInputWithinLimits(
   if (browserMessageTokenLimit !== undefined && estimatedMessageTokens > browserMessageTokenLimit) {
     throw new ChatGptWebAdapterError(
       `This prompt requires ${estimatedMessageTokens.toLocaleString("en-US")} visible message tokens, which exceeds the measured ${browserMessageTokenLimit.toLocaleString("en-US")}-token ChatGPT browser message boundary for this account and effort. The bridge keeps older conversation history in the retained chat, so only this turn's own payload must fit one browser message.`,
+      { status: 400, errorType: "invalid_request_error", code: "context_length_exceeded", retryable: false },
+    );
+  }
+  // Routes without a separately measured one-message boundary are gated by the compaction
+  // threshold, which already excludes the fixed headroom ChatGPT keeps for its own platform
+  // prompt. The transport window alone is not a safe submission gate: a 40,765-token Instant
+  // submission passed the 41,000-token window check and ChatGPT still rejected it as too long,
+  // because the real compiler/tokenizer output exceeded the remaining margin. Anything above the
+  // compaction threshold must be compacted or trimmed before it is submitted, not diagnosed
+  // afterwards.
+  if (browserMessageTokenLimit === undefined && estimatedInputTokens > autoCompactTokenLimit) {
+    throw new ChatGptWebAdapterError(
+      `This turn is estimated at ${estimatedInputTokens.toLocaleString("en-US")} input tokens, which exceeds the ${autoCompactTokenLimit.toLocaleString("en-US")}-token ChatGPT Web submission boundary for this account and effort. The remaining browser window is reserved for ChatGPT's own platform prompt, so older history must be compacted or omitted before this turn can be submitted.`,
       { status: 400, errorType: "invalid_request_error", code: "context_length_exceeded", retryable: false },
     );
   }
@@ -1271,6 +1310,69 @@ export function resolveChatGptWebMultipartStagingMode(
   );
 }
 
+/** UA used for automated turns. ChatGPT serves the Windows layout the DOM selectors expect. */
+export const CHATGPT_WEB_BROWSER_USER_AGENT =
+  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36";
+
+export type ChatGptBrowserFlavor = "chrome" | "headless-shell";
+
+/**
+ * Chrome's headless shell is the same Blink engine without the browser UI, its WebUI renderer,
+ * and the extra utility process. It is already headless by construction.
+ */
+export function resolveChatGptBrowserFlavor(executablePath: string): ChatGptBrowserFlavor {
+  return /headless[-_]?shell/i.test(basename(executablePath)) ? "headless-shell" : "chrome";
+}
+
+export interface ChatGptBrowserLaunchProfile {
+  flavor: ChatGptBrowserFlavor;
+  executablePath: string;
+  headless: boolean;
+  args: string[];
+}
+
+/**
+ * Resolve the concrete browser launch for automated turns.
+ *
+ * An explicit headless browser replaces the login Chrome only for headless turns; headed turns and
+ * login keep the full Chrome build. Launch options follow the binary flavor: a headless-shell build
+ * must be started with Playwright's headless mode, while full Chrome keeps the explicit
+ * `--headless=new` switch so window sizing and the UA override continue to apply.
+ */
+export function chatGptBrowserLaunchProfile(input: {
+  chromeExecutablePath: string;
+  headlessBrowserExecutablePath?: string;
+  headed: boolean;
+}): ChatGptBrowserLaunchProfile {
+  const executablePath = !input.headed && input.headlessBrowserExecutablePath
+    ? input.headlessBrowserExecutablePath
+    : input.chromeExecutablePath;
+  const flavor = resolveChatGptBrowserFlavor(executablePath);
+  const commonArgs = [
+    "--disable-blink-features=AutomationControlled",
+    "--no-first-run",
+    "--no-default-browser-check",
+    "--window-size=1280,800",
+    ...(!input.headed ? [`--user-agent=${CHATGPT_WEB_BROWSER_USER_AGENT}`] : []),
+  ];
+  if (flavor === "headless-shell") {
+    if (input.headed) {
+      throw new Error(
+        "chrome-headless-shell cannot run headed. Use chromeExecutablePath for headed turns and "
+        + "headlessBrowserExecutablePath only for automated headless turns.",
+      );
+    }
+    // The shell resolves its own headless switches; a second --headless=new is redundant.
+    return { flavor, executablePath, headless: true, args: commonArgs };
+  }
+  return {
+    flavor,
+    executablePath,
+    headless: false,
+    args: [...(!input.headed ? ["--headless=new"] : []), ...commonArgs],
+  };
+}
+
 export const browserStageTimeouts = {
   browserPage: 60_000,
   temporaryChatPreparation: 150_000,
@@ -1378,6 +1480,17 @@ export class ChatGptBrowserObservationTimeoutError extends Error {
   constructor(timeoutMs: number) {
     super(`ChatGPT browser DOM observation did not respond within ${timeoutMs}ms`);
     this.name = "ChatGptBrowserObservationTimeoutError";
+  }
+}
+
+/**
+ * One browser stage exceeded its budget. The stage may still be running, so callers that own an
+ * irreversible action (a submission) must settle its real outcome rather than infer one.
+ */
+export class ChatGptBrowserStageTimeoutError extends Error {
+  constructor(readonly stage: string, readonly timeoutMs: number) {
+    super(`ChatGPT browser stage timed out: ${stage}`);
+    this.name = "ChatGptBrowserStageTimeoutError";
   }
 }
 
@@ -1537,6 +1650,8 @@ export interface ResolvedBrowserConfig {
   browserDiagnosticsPath?: string;
   storageStatePath: string;
   chromeExecutablePath: string;
+  /** Optional headless-shell (or other headless) executable used only for automated turns. */
+  headlessBrowserExecutablePath?: string;
   turnTimeoutMs?: number;
   headed: boolean;
   autoApproveToolCalls: boolean;
@@ -1559,7 +1674,16 @@ export function chatGptTurnIsComplete(state: {
     && state.completionActionVisible;
 }
 
-export type ChatGptSubmissionEvidence = "user_turn" | "assistant_turn" | "generation_running" | "mcp_tool_call";
+export type ChatGptSubmissionEvidence =
+  | "user_turn"
+  | "assistant_turn"
+  | "generation_running"
+  | "mcp_tool_call"
+  /**
+   * The composer emptied after Enter without a rejection alert. That is ChatGPT's own acceptance
+   * signal; the user/assistant nodes may simply not be rendered yet while the payload is ingested.
+   */
+  | "composer_cleared";
 
 export function chatGptSubmissionEvidence(state: {
   initialUserTurnCount: number;
@@ -1572,6 +1696,42 @@ export function chatGptSubmissionEvidence(state: {
   if (state.assistantTurnCount > state.initialAssistantTurnCount) return "assistant_turn";
   if (state.generationRunning) return "generation_running";
   return undefined;
+}
+
+export type ChatGptActivatedSubmissionSettlement =
+  | { kind: "accepted"; evidence: ChatGptSubmissionEvidence }
+  | { kind: "not_submitted" }
+  | { kind: "unknown" };
+
+const composerComparisonText = (text: string): string =>
+  text.replace(/[\u200b\ufeff]/g, "").replace(/\s+/g, " ").trim();
+
+/**
+ * Resolve what a pressed send button actually did.
+ *
+ * Enter is irreversible, so a stage budget expiring after activation is not evidence that nothing
+ * was submitted; it only means the adapter has to look instead of guessing. Submission DOM
+ * evidence proves acceptance. The one state that proves the opposite is the composer still holding
+ * the submitted prompt: the payload never left the page, so a retry cannot duplicate it. Everything
+ * else stays unknown and keeps the existing ambiguous classification.
+ */
+export function chatGptActivatedSubmissionSettlement(input: {
+  evidence?: ChatGptSubmissionEvidence;
+  composerText?: string;
+  submittedPromptText?: string;
+}): ChatGptActivatedSubmissionSettlement {
+  if (input.evidence) return { kind: "accepted", evidence: input.evidence };
+  const expected = composerComparisonText(input.submittedPromptText ?? "");
+  const remaining = composerComparisonText(input.composerText ?? "");
+  if (expected.length === 0) return { kind: "unknown" };
+  // ChatGPT may re-render the composer while the click is being processed, so compare a stable
+  // tail rather than the whole payload; the exact prompt is the only text that can be there.
+  if (remaining.endsWith(expected.slice(-240))) return { kind: "not_submitted" };
+  // Enter moved the prompt out of the input and no rejection alert replaced it: the submission was
+  // accepted and is still being ingested. Treating that as "unknown" is what produced misleading
+  // ambiguous-submission failures for large prompts.
+  if (remaining.length === 0) return { kind: "accepted", evidence: "composer_cleared" };
+  return { kind: "unknown" };
 }
 
 export type ChatGptConnectorAttachmentMode = "none" | "mention" | "retained";
@@ -2280,6 +2440,7 @@ export function resolveBrowserConfig(provider: CodexProviderConfig): ResolvedBro
     && (!Number.isFinite(turnTimeoutMs) || turnTimeoutMs <= 0)) {
     throw new Error("ChatGPT Web turnTimeoutMs must be a positive finite number");
   }
+  const resolvedHeadlessBrowserPath = configured.headlessBrowserExecutablePath?.trim() || undefined;
   if (isLegacyChatGptConnectorName(appName)) {
     throw new Error(legacyChatGptConnectorMigrationMessage(appName));
   }
@@ -2291,6 +2452,9 @@ export function resolveBrowserConfig(provider: CodexProviderConfig): ResolvedBro
     browserDiagnosticsPath,
     storageStatePath: resolve(expandUserPath(configured.storageStatePath?.trim() || join(getConfigDir(), "browser", "storage-state.json"))),
     chromeExecutablePath: resolve(expandUserPath(configured.chromeExecutablePath?.trim() || defaultChromeExecutable())),
+    ...(resolvedHeadlessBrowserPath
+      ? { headlessBrowserExecutablePath: resolve(expandUserPath(resolvedHeadlessBrowserPath)) }
+      : {}),
     ...(turnTimeoutMs !== undefined ? { turnTimeoutMs } : {}),
     tuning,
     headed: configured.headed === true,
@@ -2421,7 +2585,9 @@ export class ChatGptBrowserWorker {
   private launcherHelper?: LauncherBrowserHelperClient;
   private maintenanceTail: Promise<void> = Promise.resolve();
   private readonly activeRuns = new Map<string, Promise<string>>();
-  private readonly managedConversations = new ManagedConversationPool<Page>(MAX_CHATGPT_BROWSER_TABS);
+  // Idle conversation tabs are a warm-cache optimization, not running turns, so they get their
+  // own small ceiling instead of sharing the turn limit (one retained tab is a full renderer).
+  private readonly managedConversations = new ManagedConversationPool<Page>(MAX_RETAINED_CHATGPT_TABS);
 
   commitManagedConversation(key: string, fingerprint: string): void {
     this.managedConversations.commit(key, fingerprint);
@@ -2429,6 +2595,11 @@ export class ChatGptBrowserWorker {
 
   releaseManagedConversation(key: string): Promise<void> {
     return this.managedConversations.release(key);
+  }
+
+  /** Close idle retained conversation tabs above `limit`. Running turns are never touched. */
+  trimRetainedConversations(limit: number): Promise<void> {
+    return this.managedConversations.trim(limit);
   }
 
   private constructor(private readonly config: ResolvedBrowserConfig) {}
@@ -2588,7 +2759,7 @@ export class ChatGptBrowserWorker {
           }
           stageTimedOut = true;
           controller.abort();
-          rejectTimeout(new Error(`ChatGPT browser stage timed out: ${stage}`));
+          rejectTimeout(new ChatGptBrowserStageTimeoutError(stage, timeoutMs));
         };
         timer = setTimeout(fireOrRearm, timeoutMs);
       });
@@ -2614,6 +2785,27 @@ export class ChatGptBrowserWorker {
     }
   }
 
+  /** Launch the automated-turn browser described by the configured binaries. */
+  private async launchManagedBrowser(): Promise<Browser> {
+    const profile = chatGptBrowserLaunchProfile({
+      chromeExecutablePath: this.config.chromeExecutablePath,
+      headlessBrowserExecutablePath: this.config.headlessBrowserExecutablePath,
+      headed: this.config.headed,
+    });
+    if (!existsSync(profile.executablePath)) {
+      throw new Error(`Configured ${profile.flavor} executable does not exist: ${profile.executablePath}`);
+    }
+    console.info(
+      `[chatgpt-web] launching browser flavor=${profile.flavor}`
+      + ` executable=${profile.executablePath} headless=${profile.headless}`,
+    );
+    return chromium.launch({
+      executablePath: profile.executablePath,
+      headless: profile.headless,
+      args: profile.args,
+    });
+  }
+
   private async ensurePage(): Promise<Page> {
     if (this.page && !this.page.isClosed()) return this.page;
     if (this.config.browserHost === "launcher") {
@@ -2626,22 +2818,10 @@ export class ChatGptBrowserWorker {
     if (!existsSync(this.config.storageStatePath) || !existsSync(loginVerificationMarkerPath(this.config.storageStatePath))) {
       throw new Error(`ChatGPT web login state is missing: ${this.config.storageStatePath}`);
     }
-    const launchArgs = [
-      ...(!this.config.headed ? ["--headless=new"] : []),
-      "--disable-blink-features=AutomationControlled",
-      "--no-first-run",
-      "--no-default-browser-check",
-      "--window-size=1280,800",
-      ...(!this.config.headed ? ["--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36"] : []),
-    ];
-    this.browser = await chromium.launch({
-      executablePath: this.config.chromeExecutablePath,
-      headless: false,
-      args: launchArgs,
-    });
+    this.browser = await this.launchManagedBrowser();
     this.context = await this.browser.newContext({
       storageState: this.config.storageStatePath,
-      ...(!this.config.headed ? { userAgent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36" } : {}),
+      ...(!this.config.headed ? { userAgent: CHATGPT_WEB_BROWSER_USER_AGENT } : {}),
     });
     await this.context.addInitScript("globalThis.__name = (t, v) => t;");
     this.page = await this.context.newPage();
@@ -2654,25 +2834,10 @@ export class ChatGptBrowserWorker {
       if (!existsSync(this.config.storageStatePath) || !existsSync(loginVerificationMarkerPath(this.config.storageStatePath))) {
         throw new Error(`ChatGPT web login state is missing: ${this.config.storageStatePath}`);
       }
-      if (!existsSync(this.config.chromeExecutablePath)) {
-        throw new Error(`Configured Chrome executable does not exist: ${this.config.chromeExecutablePath}`);
-      }
-      const launchArgs = [
-        ...(!this.config.headed ? ["--headless=new"] : []),
-        "--disable-blink-features=AutomationControlled",
-        "--no-first-run",
-        "--no-default-browser-check",
-        "--window-size=1280,800",
-        ...(!this.config.headed ? ["--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36"] : []),
-      ];
-      const browser = await chromium.launch({
-        executablePath: this.config.chromeExecutablePath,
-        headless: false,
-        args: launchArgs,
-      });
+      const browser = await this.launchManagedBrowser();
       const context = await browser.newContext({
         storageState: this.config.storageStatePath,
-        ...(!this.config.headed ? { userAgent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36" } : {}),
+        ...(!this.config.headed ? { userAgent: CHATGPT_WEB_BROWSER_USER_AGENT } : {}),
       });
       await context.addInitScript("globalThis.__name = (t, v) => t;");
       this.browser = browser;
@@ -4182,6 +4347,52 @@ export class ChatGptBrowserWorker {
     return evidence;
   }
 
+  /**
+   * Resolve a submission whose stage budget expired after Enter was pressed. Running turns are
+   * never inspected here; this only reads the page and classifies what the click produced.
+   */
+  private async settleActivatedSubmission(
+    page: Page,
+    baseline: ChatGptSubmissionBaseline,
+    callerSignal?: AbortSignal,
+  ): Promise<ChatGptSubmissionEvidence | undefined> {
+    if (page.isClosed() || callerSignal?.aborted) return undefined;
+    // A submission rejection the browser rendered is definitive (for example the composer
+    // overflow alert); surface it rather than guessing from an empty or unchanged DOM.
+    await throwIfChatGptSubmissionErrorAlert(page);
+    let evidence: ChatGptSubmissionEvidence | undefined;
+    try {
+      evidence = await withChatGptBrowserObservationTimeout(
+        this.currentSubmissionEvidence(page, baseline),
+      );
+    } catch {
+      evidence = undefined;
+    }
+    const settlement = chatGptActivatedSubmissionSettlement({
+      evidence,
+      composerText: await this.readComposerText(page),
+      submittedPromptText: baseline.submittedPromptText,
+    });
+    if (settlement.kind === "accepted") return settlement.evidence;
+    if (settlement.kind === "not_submitted") {
+      throw new ChatGptWebAdapterError(
+        "ChatGPT did not act on the send keypress; the prompt is still in the composer, so nothing was submitted. Retry the turn.",
+        { status: 503, errorType: "server_error", code: "chatgpt_prompt_not_submitted", retryable: true },
+      );
+    }
+    return undefined;
+  }
+
+  /** Best-effort composer text read used only to settle a submission outcome. */
+  private async readComposerText(page: Page): Promise<string> {
+    try {
+      const composer = await this.activeComposer(page, 5_000);
+      return (await composer.evaluate(element => element.textContent ?? "")) ?? "";
+    } catch {
+      return "";
+    }
+  }
+
   private async waitForMultipartAcknowledgement(
     page: Page,
     initialResponseTurn: ChatGptAssistantTurnBinding,
@@ -4967,7 +5178,7 @@ export class ChatGptBrowserWorker {
       const key = turn.retainConversation ? turn.conversationKey : undefined;
       let retained = key ? await this.managedConversations.take(key, turn.conversationPredecessor) : undefined;
       try {
-        await this.managedConversations.trim(MAX_CHATGPT_BROWSER_TABS - this.activeRuns.size);
+        await this.managedConversations.trim(MAX_RETAINED_CHATGPT_TABS);
         if (retained && (retained.isClosed()
           || !retained.url().startsWith("https://chatgpt.com/")
           || !await retained.locator(CHATGPT_ASSISTANT_TURN_SELECTOR).count())) {
@@ -5495,29 +5706,59 @@ export class ChatGptBrowserWorker {
         );
         await diagnostics.capture(page, `${stagePrefix}file-attachment-complete`);
         submissionBaseline.submittedPromptText = finalPrompt;
-        const finalSubmissionEvidence = await this.runStage(
-          turn.traceId,
-          `${stagePrefix}send`,
-          // A multipart commit lands on a conversation already carrying every staged part, so it
-          // needs the same acceptance headroom the stages themselves get.
-          prepared.multipart ? browserStageTimeouts.multipartStageSend : browserStageTimeouts.send,
-          (stageSignal) => this.sendAttachedPrompt(
-            page,
-            submissionBaseline,
-            checkpoint => diagnostics.capture(page, checkpoint),
-            turn.abortSignal ? AbortSignal.any([stageSignal, turn.abortSignal]) : stageSignal,
-            turn.externalProgress,
-            turn,
-            completionTracker,
-            toolTurnObservationRecovery
-              ? async (...args) => {
-                const recovered = await recoverSubmissionObservation(...args);
-                submissionBaseline = recovered.baseline;
-                return recovered;
-              }
-              : undefined,
-          ),
-        );
+        const sendStage = `${stagePrefix}send`;
+        let sendActivated = false;
+        let finalSubmissionEvidence: ChatGptSubmissionEvidence;
+        try {
+          finalSubmissionEvidence = await this.runStage(
+            turn.traceId,
+            sendStage,
+            // A multipart commit lands on a conversation already carrying every staged part, so it
+            // needs the same acceptance headroom the stages themselves get.
+            prepared.multipart ? browserStageTimeouts.multipartStageSend : browserStageTimeouts.send,
+            (stageSignal) => this.sendAttachedPrompt(
+              page,
+              submissionBaseline,
+              checkpoint => diagnostics.capture(page, checkpoint),
+              turn.abortSignal ? AbortSignal.any([stageSignal, turn.abortSignal]) : stageSignal,
+              turn.externalProgress,
+              {
+                onSendActivated: () => {
+                  sendActivated = true;
+                  return turn.onSendActivated?.();
+                },
+                onSubmitted: () => turn.onSubmitted?.(),
+              },
+              completionTracker,
+              toolTurnObservationRecovery
+                ? async (...args) => {
+                  const recovered = await recoverSubmissionObservation(...args);
+                  submissionBaseline = recovered.baseline;
+                  return recovered;
+                }
+                : undefined,
+            ),
+          );
+        } catch (error) {
+          // Enter was already pressed, so a stage budget expiring is not evidence that nothing
+          // was submitted. Settle the browser's real outcome instead of handing the caller an
+          // unknowable submission state.
+          if (!(error instanceof ChatGptBrowserStageTimeoutError)
+            || error.stage !== sendStage
+            || !sendActivated
+            || turn.abortSignal?.aborted) {
+            throw error;
+          }
+          await diagnostics.capture(page, `${stagePrefix}send-settlement`);
+          const settled = await this.settleActivatedSubmission(page, submissionBaseline, turn.abortSignal);
+          if (!settled) throw error;
+          console.warn(
+            `[chatgpt-web] browser turn ${turn.traceId} submission settled after the send budget expired`
+            + ` evidence=${settled}`,
+          );
+          finalSubmissionEvidence = settled;
+          turn.onSubmitted?.();
+        }
         console.info(`[chatgpt-web] browser turn ${turn.traceId} submission accepted evidence=${finalSubmissionEvidence}`);
         const responseTurn = await this.waitForNewAssistantTurn(
           page,

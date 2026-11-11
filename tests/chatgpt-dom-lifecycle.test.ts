@@ -91,12 +91,16 @@ browserTest("submission alerts outside a detached assistant preserve overflow an
     await expect(throwIfChatGptSubmissionErrorAlert(page)).rejects.toMatchObject({
       code: "context_length_exceeded", status: 400, errorType: "invalid_request_error", retryable: false,
     });
+    await page.setContent('<main><aside role="alert">The message you submitted was too long, please edit and resubmit.</aside></main>');
+    await expect(throwIfChatGptSubmissionErrorAlert(page)).rejects.toMatchObject({
+      code: "context_length_exceeded", status: 400, errorType: "invalid_request_error", retryable: false,
+    });
     await page.setContent('<main><aside role="alert">Something went wrong. Please try again<button>Retry</button></aside></main>');
     await expect(throwIfChatGptSubmissionErrorAlert(page)).rejects.toMatchObject({
       code: "upstream_server_error", status: 502, retryable: false,
     });
     // Quoted history, hidden alerts, and unrelated notifications are not submission failures.
-    await page.setContent('<aside role="alert">The messages you submitted were too long, please edit them and resubmit.</aside><main><p>Something went wrong. Please try againRetry</p><aside role="alert" hidden>The messages you submitted were too long, please edit them and resubmit.</aside><aside role="alert">Allow ChatGPT to use local-shell-dsh?</aside></main>');
+    await page.setContent('<aside role="alert">The messages you submitted were too long, please edit them and resubmit.</aside><aside role="alert">The message you submitted was too long, please edit and resubmit.</aside><main><p>Something went wrong. Please try againRetry</p><aside role="alert" hidden>The messages you submitted were too long, please edit them and resubmit.</aside><aside role="alert" hidden>The message you submitted was too long, please edit and resubmit.</aside><aside role="alert">Allow ChatGPT to use local-shell-dsh?</aside></main>');
     await throwIfChatGptSubmissionErrorAlert(page);
   } finally {
     await browser.close();

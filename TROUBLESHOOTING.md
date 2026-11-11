@@ -49,6 +49,10 @@ Specify your browser executable path explicitly. Login uses Chromium/Chrome driv
 dsh-chatgpt-web setup --chrome "C:\Program Files\Google\Chrome\Application\chrome.exe"
 ```
 
+To run automated turns on the lighter headless-shell build, set
+`headlessBrowserExecutablePath` in `config.json` to that binary. Login and headed
+runs still use `chromeExecutablePath`; a shell binary cannot serve a headed turn.
+
 ---
 
 ### 4. Temporary Rate Limits or Cloudflare Verification

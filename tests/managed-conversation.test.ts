@@ -37,6 +37,15 @@ test("uncommitted, closed and evicted pages cannot lose canonical history", asyn
   expect(second.closed).toBe(true);
 });
 
+test("retention can be disabled without leaking a renderer", async () => {
+  const pool = new ManagedConversationPool<Page>(0);
+  const page = new Page();
+  await pool.put("one", page);
+  expect(page.closed).toBe(true);
+  expect(await pool.take("one", "history")).toBeUndefined();
+  await pool.trim(0);
+});
+
 test("canonical tool rounds and pi-ai replay metadata preserve the predecessor proof", () => {
   const input = [{ role: "user", content: "run two commands" },
     { type: "function_call", call_id: "call_1", name: "bash", arguments: "{}" },

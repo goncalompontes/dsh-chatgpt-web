@@ -1,0 +1,16 @@
+[Unit]
+Description=ChatGPT-Web error sentinel (opens a T3 fix thread when the adapter logs a failure)
+After=default.target
+
+[Service]
+Type=simple
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+Environment=T3CODE_HOME=%h/.t3
+ExecStart=/usr/bin/node %h/.local/share/dsh-web-stack/chatgpt-web-error-sentinel.mjs
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=default.target
