@@ -58,6 +58,25 @@ test("a submission above the route's measured one-message boundary never reaches
     .toThrow(/40,000-token ChatGPT browser message boundary/);
 });
 
+test("the High-effort temporary-chat overflow is stopped by the measured message boundary", () => {
+  // Trace a9848e58328a (this report). The preflight admitted the turn because the route's
+  // 1,048,572-character composer limit covers 194,182 characters and the 80,000-token compaction
+  // fallback covers 57,456 estimated input tokens; ChatGPT then rendered "The messages you
+  // submitted were too long, please edit them and resubmit" (diagnostic 19-turn-failed.png). The
+  // single compiled message carried 49,264 visible tokens (57,456 minus the 8,192 platform
+  // reserve), which is above the measured 40,000-token one-message acceptance boundary. The gate
+  // must therefore reject it as a browser *message* boundary before it reaches the composer, so
+  // transportFits() runs the history trim instead of submitting an oversized replay.
+  expect(() => assertChatGptWebInputWithinLimits(
+    57_456,
+    49_264,
+    "gpt-6",
+    "high",
+    plusCapabilities,
+    194_182,
+  )).toThrow(/40,000-token ChatGPT browser message boundary/);
+});
+
 test("unknown models are still rejected", () => {
   expect(() => assertChatGptWebInputWithinLimits(100, 100, "gpt-9", "low", plusCapabilities, 10))
     .toThrow(/context limit is not defined for model: gpt-9/);
