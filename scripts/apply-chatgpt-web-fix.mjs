@@ -28,7 +28,8 @@
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
-  closeSync, existsSync, mkdirSync, openSync, readFileSync, rmSync, statSync, writeFileSync,
+  closeSync, copyFileSync, existsSync, mkdirSync, openSync, readFileSync, renameSync, rmSync,
+  statSync, writeFileSync,
 } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -143,7 +144,30 @@ function prepareDeployApp(head) {
     run(CONFIG.appDir, CONFIG.bun, ["install", "--prefer-offline"]);
   }
   log("building the deployment bundle");
-  run(CONFIG.appDir, CONFIG.bun, ["run", "build"]);
+  // Build beside the live bundle first: copying into lib/ is what wakes the sidecar's built-code
+  // watcher, and an unchanged rebuild must not schedule a pointless idle restart.
+  const staged = join(CONFIG.appDir, "lib.staged");
+  rmSync(staged, { recursive: true, force: true });
+  run(CONFIG.appDir, CONFIG.bun, [
+    "build", "src/cli.ts", "src/plugin.ts",
+    "--outdir", "lib.staged", "--target", "node", "--format", "esm", "--packages", "external",
+  ]);
+  const sameBytes = (left, right) => existsSync(left) && existsSync(right)
+    && readFileSync(left).equals(readFileSync(right));
+  const files = ["cli.js", "plugin.js"];
+  const changed = files.filter(file => !sameBytes(join(CONFIG.appDir, "lib", file), join(staged, file)));
+  if (changed.length > 0) {
+    log(`publishing rebuilt bundle: ${changed.join(",")}`);
+    mkdirSync(join(CONFIG.appDir, "lib"), { recursive: true });
+    for (const file of changed) {
+      const temporary = join(CONFIG.appDir, "lib", `${file}.apply-${process.pid}`);
+      copyFileSync(join(staged, file), temporary);
+      renameSync(temporary, join(CONFIG.appDir, "lib", file));
+    }
+  } else {
+    log("bundle unchanged; not touching the live files");
+  }
+  rmSync(staged, { recursive: true, force: true });
   if (!existsSync(join(CONFIG.appDir, "lib", "cli.js"))) {
     throw new Error(`Build did not produce ${join(CONFIG.appDir, "lib", "cli.js")}`);
   }
