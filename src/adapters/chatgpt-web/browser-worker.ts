@@ -813,6 +813,109 @@ export async function throwIfChatGptRateLimitDialog(page: Page): Promise<void> {
   );
 }
 
+/**
+ * ChatGPT's account-level submission gate.
+ *
+ * When the profile has sent "a large number of messages in a short time", ChatGPT stops admitting
+ * new submissions and renders a live notice in the composer footer ("We're doing a quick check to
+ * keep ChatGPT reliable. Try again after 4:01 PM."). The composer still accepts text while that
+ * notice is present, but the client disables Send, so no staged prompt can be submitted. This is an
+ * upstream admission verdict with its own resume time, not a composer race and not the modal
+ * "Too many requests" dialog handled above.
+ */
+const CHATGPT_SUBMISSION_GATE_PATTERN =
+  /(?:quick check to keep ChatGPT (?:safe and )?reliable|detected unusual activity coming from your system)/i;
+/** "Try again after 4:01 PM" / "Try again at 16:01". */
+const CHATGPT_SUBMISSION_GATE_CLOCK =
+  /try again (?:after|at) (\d{1,2}):(\d{2})\s*(am|pm)?/i;
+/** "Try again in 5 minutes" / "Try again in 90 seconds". */
+const CHATGPT_SUBMISSION_GATE_RELATIVE =
+  /try again in (\d+)\s*(second|sec|minute|min|hour|hr|h)s?\b/i;
+
+/** The gate notice text when `text` is one, otherwise `undefined`. */
+export function chatGptSubmissionGateText(text: string): string | undefined {
+  const normalized = text.replace(/\s+/g, " ").trim();
+  if (!CHATGPT_SUBMISSION_GATE_PATTERN.test(normalized)) return undefined;
+  return normalized.slice(0, 300);
+}
+
+/**
+ * The instant ChatGPT says submissions reopen, resolved against `now`.
+ *
+ * The client only ever announces a future resume point, so a clock time already behind `now`
+ * belongs to the next day. Used for the diagnostic message only: the gate is not an in-request
+ * retry hint, because it routinely outlives the turn by hours.
+ */
+export function chatGptSubmissionGateResumeAt(text: string, now = new Date()): Date | undefined {
+  const relative = CHATGPT_SUBMISSION_GATE_RELATIVE.exec(text);
+  if (relative) {
+    const amount = Number(relative[1]);
+    if (!Number.isFinite(amount) || amount <= 0) return undefined;
+    const unit = relative[2].toLowerCase();
+    const unitMs = unit.startsWith("h") ? 3_600_000 : unit.startsWith("m") ? 60_000 : 1_000;
+    return new Date(now.getTime() + amount * unitMs);
+  }
+  const clock = CHATGPT_SUBMISSION_GATE_CLOCK.exec(text);
+  if (!clock) return undefined;
+  let hours = Number(clock[1]);
+  const minutes = Number(clock[2]);
+  if (hours > 23 || minutes > 59) return undefined;
+  const meridiem = clock[3]?.toLowerCase();
+  if (meridiem) {
+    if (hours < 1 || hours > 12) return undefined;
+    if (meridiem === "pm" && hours !== 12) hours += 12;
+    if (meridiem === "am" && hours === 12) hours = 0;
+  }
+  const resume = new Date(now);
+  resume.setHours(hours, minutes, 0, 0);
+  if (resume.getTime() <= now.getTime()) resume.setDate(resume.getDate() + 1);
+  return resume;
+}
+
+/**
+ * Deterministic adapter verdict for a gated account. It is not retryable inside a turn: the resume
+ * time is hours away, so replaying the same browser turn only stages the prompt again.
+ */
+export function chatGptSubmissionGateError(notice: string, now = new Date()): ChatGptWebAdapterError {
+  const text = chatGptSubmissionGateText(notice) ?? notice.replace(/\s+/g, " ").trim().slice(0, 300);
+  const resume = chatGptSubmissionGateResumeAt(text, now);
+  const resumeText = resume === undefined
+    ? ""
+    : ` ChatGPT announced that submissions reopen at ${resume.toLocaleString("en-US")}.`;
+  return new ChatGptWebAdapterError(
+    `ChatGPT is gating this account at the submission boundary, so the message was not submitted: "${text}".${resumeText}`
+    + " This is ChatGPT's own rate/abuse guardrail, not a composer, staging or transport failure;"
+    + " the composer still accepts text but the client disables Send until the gate clears.",
+    { status: 429, errorType: "rate_limit_error", code: "chatgpt_submission_gated", retryable: false },
+  );
+}
+
+/** The visible submission-gate notice, if ChatGPT is currently refusing new messages. */
+export async function readChatGptSubmissionGate(page: Page): Promise<string | undefined> {
+  const notices = await page.locator('[role="status"], [role="alert"]').evaluateAll(elements => (
+    elements
+      .filter(element => {
+        const candidate = element as HTMLElement;
+        const style = getComputedStyle(candidate);
+        if (style.display === "none" || style.visibility === "hidden" || style.opacity === "0") return false;
+        const rect = candidate.getBoundingClientRect();
+        // ChatGPT renders several 1x1 visually hidden role=status nodes; only a laid-out notice is live.
+        return rect.width >= 8 && rect.height >= 8;
+      })
+      .map(element => (element.textContent ?? "").replace(/\s+/g, " ").trim())
+  )).catch(() => [] as string[]);
+  for (const text of notices) {
+    const gate = chatGptSubmissionGateText(text);
+    if (gate) return gate;
+  }
+  return undefined;
+}
+
+export async function throwIfChatGptSubmissionGate(page: Page, now = new Date()): Promise<void> {
+  const gate = await readChatGptSubmissionGate(page);
+  if (gate !== undefined) throw chatGptSubmissionGateError(gate, now);
+}
+
 const chatGptTemporaryChatOnboardingDialog = (page: Page): Locator => page
   .locator('[role="dialog"]')
   .filter({ hasText: "Not in history" })
@@ -2355,6 +2458,7 @@ class ChatGptBrowserDiagnostics {
           : Promise.resolve(undefined),
         withChatGptBrowserObservationTimeout(page.evaluate(({
           composerSelector,
+          sendButtonSelector,
           effortControlSelector,
           effortItemSelector,
           assistantTurnSelector,
@@ -2414,6 +2518,20 @@ class ChatGptBrowserDiagnostics {
             effortItems: rows(effortItemSelector, 20),
             menus: rows('[role="menu"], [role="listbox"], [data-testid="composer-intelligence-picker-content"]', 20),
             connectorRows: rows('.__menu-item[tabindex="0"]', 40),
+            // The send control's own disabled state is the observable behind "send button remained
+            // disabled"; capture it so that checkpoint proves the control state instead of leaving
+            // it to a screenshot. ChatGPT disables Send through the native attribute.
+            sendControls: [...document.querySelectorAll<HTMLElement>(sendButtonSelector)].slice(0, 4).map(element => {
+              const rect = element.getBoundingClientRect();
+              return {
+                tag: element.tagName.toLowerCase(),
+                testId: element.getAttribute("data-testid"),
+                ariaLabel: element.getAttribute("aria-label"),
+                disabled: element.hasAttribute("disabled"),
+                ariaDisabled: element.getAttribute("aria-disabled"),
+                rect: { x: rect.x, y: rect.y, width: rect.width, height: rect.height },
+              };
+            }),
             overlays: rows('[role="dialog"], [role="alert"], [role="status"]', 30),
             turns: {
               user: document.querySelectorAll('[data-testid^="conversation-turn-"][data-message-author-role="user"], [data-chatgpt-search-unit-key$=":user"], [data-content-search-unit-key$=":user"]').length,
@@ -2445,6 +2563,7 @@ class ChatGptBrowserDiagnostics {
           };
         }, {
           composerSelector: CHATGPT_COMPOSER_SELECTOR,
+          sendButtonSelector: CHATGPT_SEND_BUTTON_SELECTORS,
           effortControlSelector: CHATGPT_EFFORT_CONTROL_SELECTOR,
           effortItemSelector: CHATGPT_EFFORT_ITEM_SELECTOR,
           assistantTurnSelector: CHATGPT_ASSISTANT_TURN_SELECTOR,
@@ -3227,6 +3346,11 @@ export class ChatGptBrowserWorker {
           await captureDiagnostic?.(`temporary-chat-onboarding-dismissed${checkpointSuffix}`);
         }
         await captureDiagnostic?.(`composer-ready${checkpointSuffix}`);
+        // A visible composer is not an admissible submission surface: while the account-level
+        // reliability gate is up ChatGPT accepts text into it and disables Send. Surface the gate
+        // before any effort selection or prompt staging instead of spending the turn on a
+        // submission the page has already refused.
+        await throwIfChatGptSubmissionGate(page);
         await throwIfChatGptSessionFailureAlert(page);
         await assertAuthenticatedChatGptPage(page);
         await assertTemporaryChatPage(page);
@@ -4299,6 +4423,10 @@ export class ChatGptBrowserWorker {
     reuseConnector = false,
   ): Promise<void> {
     throwIfPromptAttachmentAborted(abortSignal);
+    // Staging is the first irreversible-looking step of a turn (it mutates the composer and, for a
+    // connector turn, opens its menu), so never start it for an account ChatGPT has gated. This
+    // also covers retained conversations, which skip prepareTemporaryChatSurface entirely.
+    await throwIfChatGptSubmissionGate(page);
     const connectorMode = chatGptConnectorAttachmentMode(localTools, reuseConnector);
     let composerMutationStarted = false;
     try {
@@ -4410,9 +4538,18 @@ export class ChatGptBrowserWorker {
       if (page.isClosed()) throw chatGptBrowserTabClosedError();
       await throwIfChatGptSessionFailureAlert(page);
       await throwIfChatGptRateLimitDialog(page);
+      const submissionGate = await readChatGptSubmissionGate(page);
+      if (submissionGate !== undefined) {
+        await captureDiagnostic?.("send-gated");
+        throw chatGptSubmissionGateError(submissionGate);
+      }
       if (await sendButton.isEnabled()) break;
       if (Date.now() >= sendEnableDeadline) {
         await captureDiagnostic?.("send-disabled");
+        // Re-read the gate at the failure boundary as well: a gate can appear after the last poll.
+        // If the control is disabled without a published gate, that remains an unexplained
+        // adapter/DOM fault and keeps its own error.
+        await throwIfChatGptSubmissionGate(page);
         throw new Error("ChatGPT send button remained disabled after the complete prompt was attached");
       }
       await settleChatGptUi();
