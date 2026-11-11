@@ -24,7 +24,7 @@
  *
  * Env overrides: APPLY_REPO (git repo used for merging), APPLY_BUILD_DIR (throwaway build
  * worktree), APPLY_APP_DIR (deployment worktree the stack sidecar runs from), APPLY_REMOTE,
- * APPLY_HEALTH, APPLY_STACK, APPLY_IDLE_TIMEOUT_SECONDS, APPLY_BUN.
+ * APPLY_HEALTH, APPLY_IDLE_TIMEOUT_SECONDS (how long to wait for the watcher reload), APPLY_BUN.
  */
 
 import { execFileSync } from "node:child_process";
@@ -45,7 +45,6 @@ const CONFIG = {
   appDir: process.env.APPLY_APP_DIR ?? join(HOME, ".local/share/dsh-web-stack/app"),
   remote: process.env.APPLY_REMOTE ?? "fork",
   healthUrl: process.env.APPLY_HEALTH ?? "http://127.0.0.1:17841/healthz",
-  stack: process.env.APPLY_STACK ?? "dsh-web-stack",
   idleTimeoutSeconds: Number(process.env.APPLY_IDLE_TIMEOUT_SECONDS ?? 120),
   bun: process.env.APPLY_BUN ?? "bun",
 };
