@@ -140,9 +140,14 @@ function readFromOffset(offset) {
   }
 }
 
-/** Stable identity for an error: drop traces, ids, timings, numbers and quoted payload text. */
-export function signatureFor(stage, cause) {
-  const normalized = `${stage ? `stage:${stage} ` : ""}${cause}`
+/**
+ * Stable identity for an error: drop traces, ids, timings, numbers and quoted payload text.
+ *
+ * The stage and turn log lines for one failure carry the same cause, so the stage must not be part
+ * of the identity or a single failure opens two fix threads.
+ */
+export function signatureFor(cause) {
+  const normalized = `${cause}`
     .replace(/\b[0-9a-f]{8,}\b/gi, "<id>")
     .replace(/\d+(?:[.,]\d+)*\s*(?:ms|s|m|h|tokens?|chars?|bytes?|mb|mib|gb|gib)\b/gi, "<n>")
     .replace(/\b\d+\b/g, "<n>")
@@ -154,7 +159,8 @@ export function signatureFor(stage, cause) {
   return normalized.slice(0, 160);
 }
 
-const comparable = (sig) => sig.slice(0, 120);
+// Older state entries stored "stage:<stage> <cause>"; compare without that prefix.
+const comparable = (sig) => sig.replace(/^stage:\S+\s+/, "").slice(0, 120);
 
 export function classifyLine(line) {
   for (const format of FAILURE_PATTERNS) {
@@ -164,7 +170,7 @@ export function classifyLine(line) {
     if (!cause) return undefined;
     if (IGNORED_CAUSES.some(ignored => ignored.test(cause))) return undefined;
     const stage = format.stage(match);
-    return { trace: format.trace(match), stage, cause, sig: signatureFor(stage, cause) };
+    return { trace: format.trace(match), stage, cause, sig: signatureFor(cause) };
   }
   return undefined;
 }
@@ -196,6 +202,8 @@ function briefFor(detection, contextLines) {
     : `${DIAGNOSTICS_DIR}/`;
   return [
     "A chatgpt-web provider error was detected automatically from the live adapter log. Fix the cause, not the symptom.",
+    "",
+    "Before anything else: archive this thread so it stays out of the user's thread list. Call the t3_thread_organize tool with action \"archive\" and no threadId (it defaults to this thread). Archiving does not interrupt the run; continue the work afterwards.",
     "",
     `Observed error: ${detection.cause}`,
     `Adapter stage: ${detection.stage ?? "unknown"}`,
@@ -337,6 +345,12 @@ function selfTest() {
   if (!a || !b || a.sig !== b.sig) {
     failures += 1;
     console.error("self-test failed: trace ids and durations must not change a signature");
+  }
+  const stageLine = classifyLine("[chatgpt-web] browser turn abc123 stage=send failed durationMs=20251: ChatGPT rejected the submitted messages as too long.");
+  const turnLine = classifyLine("[chatgpt-web] browser turn abc123 failed: ChatGPT rejected the submitted messages as too long.");
+  if (!stageLine || !turnLine || stageLine.sig !== turnLine.sig) {
+    failures += 1;
+    console.error("self-test failed: the stage and turn lines of one failure must share a signature");
   }
   console.log(failures === 0 ? "self-test passed" : `self-test failed (${failures})`);
   process.exit(failures === 0 ? 0 : 1);
