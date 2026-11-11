@@ -1843,6 +1843,22 @@ export function chatGptNewTurnIdentity(
 }
 
 /**
+ * A person's message is always appended after the preceding transcript, so only a new identity
+ * that is also the newest user turn can be a competing message typed while our response was
+ * detached. A long Temporary Chat virtualizes its history; an older user turn can mount (or
+ * re-render under a new key) while our submitted turn remains the newest one. Those added
+ * identities describe transcript hydration, not a new human message.
+ */
+export function chatGptAppendedUserTurn(
+  accepted: readonly string[],
+  current: readonly string[],
+): string | undefined {
+  const known = new Set(accepted);
+  const newest = current.at(-1);
+  return newest !== undefined && !known.has(newest) ? newest : undefined;
+}
+
+/**
  * Stable conversation identity from the current URL. Temporary Chat starts as a local
  * conversation (`/c/local-chatgpt:<uuid>`) and later migrates to a server conversation
  * (`/c/<uuid>`); a change while a turn is active means the transcript was remounted.
@@ -3666,7 +3682,15 @@ export class ChatGptBrowserWorker {
     const state = await this.submissionDomState(page, baseline.domCache, signal);
     const acceptedUsers = new Set(binding.acceptedUserTurnIdentities);
     const addedUsers = state.userIdentities.filter(identity => !acceptedUsers.has(identity));
-    if (addedUsers.length > 0) {
+    // Only the newest user turn can be a message appended by the person at the browser. A long
+    // Temporary Chat virtualizes its transcript, so an older turn can mount, or an accepted turn
+    // can be renumbered, while our submitted turn is still the newest one. Those added identities
+    // are history hydration; rejecting them failed a healthy response after tool delivery.
+    const appendedUser = chatGptAppendedUserTurn(
+      binding.acceptedUserTurnIdentities,
+      state.userIdentities,
+    );
+    if (appendedUser) {
       // User turns can be virtualized when the assistant first appears. A connector approval
       // can hydrate that original prompt and renumber the assistant's fallback key. Prove the
       // newly discovered node is our own submission rather than equating a new DOM key with
@@ -3680,9 +3704,9 @@ export class ChatGptBrowserWorker {
       let submittedPromptMatches = false;
       let observedPromptChars: number | undefined;
       let commonPrefixChars: number | undefined;
-      if (!ownUserStillPresent && addedUsers.length === 1 && expected) {
+      if (!ownUserStillPresent && expected) {
         const actual = await withChatGptBrowserObservationTimeout(withBrowserTurnAbort(
-          chatGptTurnLocator(page, addedUsers[0]!).evaluate(element => {
+          chatGptTurnLocator(page, appendedUser).evaluate(element => {
             const bubble = element.querySelector('[data-user-message-bubble], [data-message-author-role="user"]') ?? element;
             const clone = bubble.cloneNode(true) as HTMLElement;
             // A collapsed long prompt has an explicit expander. Record it before removing controls.
@@ -3711,9 +3735,9 @@ export class ChatGptBrowserWorker {
         commonPrefixChars = 0;
         while (commonPrefixChars < Math.min(expected.length, observedPrompt.length)
           && expected[commonPrefixChars] === observedPrompt[commonPrefixChars]) commonPrefixChars += 1;
-        // A rehydrated user turn must still be the newest user turn in the transcript. This keeps
+        // The appended turn is by construction the newest user turn in the transcript. This keeps
         // the competing-input guard while allowing our own virtualized/truncated prompt through.
-        const isLatestUserTurn = state.userIdentities.at(-1) === addedUsers[0];
+        const isLatestUserTurn = state.userIdentities.at(-1) === appendedUser;
         submittedPromptMatches = isLatestUserTurn && (
           normalized === expected
           || mentions.some(mention => normalized.startsWith(mention) && normalized.slice(mention.length) === expected)
@@ -3739,6 +3763,8 @@ export class ChatGptBrowserWorker {
         })}`);
         throw new Error("ChatGPT opened another user turn while the bound assistant response was detached");
       }
+    } else if (addedUsers.length > 0) {
+      console.info(`[chatgpt-web] assistant_rebind_history_hydration addedUsers=${addedUsers.length} newestUserRetained=true`);
     }
     const identity = chatGptReboundTurnIdentity(
       baseline.initialResponseTurnIdentities,
@@ -3746,7 +3772,7 @@ export class ChatGptBrowserWorker {
       state.responseIdentities,
     );
     if (!identity || identity === binding.identity) return binding;
-    console.info(`[chatgpt-web] assistant_rebound addedUsers=${addedUsers.length} responses=${state.responseIdentities.length} submittedPromptMatched=${addedUsers.length > 0}`);
+    console.info(`[chatgpt-web] assistant_rebound addedUsers=${addedUsers.length} responses=${state.responseIdentities.length} submittedPromptMatched=${appendedUser !== undefined}`);
     return {
       identity,
       locator: chatGptTurnLocator(page, identity),

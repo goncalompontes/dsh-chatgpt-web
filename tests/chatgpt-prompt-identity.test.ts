@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { chatGptPromptIdentityMatches } from "../src/adapters/chatgpt-web/browser-worker";
+import { chatGptAppendedUserTurn, chatGptPromptIdentityMatches } from "../src/adapters/chatgpt-web/browser-worker";
 
 const prompt = "x".repeat(40_000) + " end";
 
@@ -57,4 +57,12 @@ test("a collapsed compaction fragment matches when structure proves the newest u
     commonPrefixChars: 0,
     structuralProof: true,
   })).toBe(false);
+});
+
+test("only a user identity appended as the newest turn can be competing input", () => {
+  expect(chatGptAppendedUserTurn(["u:0", "u:1"], ["u:0", "u:1"])).toBeUndefined();
+  // Transcript virtualization mounted an older turn; our submitted turn is still the newest.
+  expect(chatGptAppendedUserTurn(["u:1"], ["u:0", "u:1"])).toBeUndefined();
+  // A new identity at the end of the transcript is the only shape a typed message can take.
+  expect(chatGptAppendedUserTurn(["u:0"], ["u:0", "u:2"])).toBe("u:2");
 });
