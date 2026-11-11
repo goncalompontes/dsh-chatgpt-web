@@ -1,0 +1,8 @@
+[
+  {"stage":"serial","case":"read","model":"chatgpt-web/gpt-6-light","turn":"fresh","width":1,"hostSetupSeconds":1,"toFirstAnswerSeconds":10,"totalSeconds":13},
+  {"stage":"serial","case":"read","model":"chatgpt-web/gpt-6-light","turn":"fresh","width":1,"hostSetupSeconds":1,"toFirstAnswerSeconds":11,"totalSeconds":14},
+  {"stage":"serial","case":"read","model":"chatgpt-web/gpt-6-light","turn":"fresh","width":1,"hostSetupSeconds":1,"toFirstAnswerSeconds":12,"totalSeconds":15},
+  {"stage":"serial","case":"read","model":"chatgpt-web/gpt-6-light","turn":"retained","width":1,"hostSetupSeconds":0.4,"toFirstAnswerSeconds":3.1,"totalSeconds":4.1},
+  {"stage":"serial","case":"read","model":"chatgpt-web/gpt-6-light","turn":"retained","width":1,"hostSetupSeconds":0.5,"toFirstAnswerSeconds":4.1,"totalSeconds":5.1},
+  {"stage":"serial","case":"read","model":"chatgpt-web/gpt-6-light","turn":"retained","width":1,"hostSetupSeconds":0.6,"toFirstAnswerSeconds":5.1,"totalSeconds":6.1}
+]
