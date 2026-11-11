@@ -3,7 +3,7 @@
  * Offline, report-only latency comparison. No browser, credentials, or network access.
  * Input: sanitized per-turn results.json from measure-latency-matrix.py, or fixture rows.
  */
-import { readFileSync, writeFileSync } from "node:fs";
+import { closeSync, fchmodSync, openSync, readFileSync, writeFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 
 export const METRICS = Object.freeze([
@@ -39,12 +39,16 @@ export function compare(before, after, options) {
   if (baseline.n < options.minSamples || candidate.n < options.minSamples) {
     return { status: "insufficient-samples", baseline, candidate, regression: null };
   }
-  const deltaSeconds = round(candidate.median - baseline.median);
-  const deltaPercent = baseline.median > 0
-    ? round(100 * deltaSeconds / baseline.median) : null;
-  // BOTH absolute and relative thresholds must be exceeded.
-  const regression = deltaSeconds > options.absoluteThresholdSeconds &&
-    (baseline.median === 0 || deltaSeconds / baseline.median > options.relativeThreshold);
+  // Compare full-precision medians; rounding is only for report presentation.
+  const baselineMedian = median(before.filter((v) => typeof v === "number" && Number.isFinite(v) && v >= 0).sort((a, b) => a - b));
+  const candidateMedian = median(after.filter((v) => typeof v === "number" && Number.isFinite(v) && v >= 0).sort((a, b) => a - b));
+  const rawDeltaSeconds = candidateMedian - baselineMedian;
+  const deltaSeconds = round(rawDeltaSeconds);
+  const deltaPercent = baselineMedian > 0
+    ? round(100 * rawDeltaSeconds / baselineMedian) : null;
+  // BOTH absolute and relative thresholds must be exceeded before rounding.
+  const regression = rawDeltaSeconds > options.absoluteThresholdSeconds &&
+    (baselineMedian === 0 || rawDeltaSeconds / baselineMedian > options.relativeThreshold);
   return { status: "compared", baseline, candidate, deltaSeconds, deltaPercent, regression };
 }
 
@@ -145,6 +149,18 @@ export function markdown(report) {
   return lines.join("\n") + "\n";
 }
 
+function writePrivateReport(path, content) {
+  // mode is ignored on existing files, so set permissions on the opened descriptor
+  // before writing any new report content.
+  const fd = openSync(path, "w", 0o600);
+  try {
+    fchmodSync(fd, 0o600);
+    writeFileSync(fd, content);
+  } finally {
+    closeSync(fd);
+  }
+}
+
 function parseArgs(argv) {
   const flags = {};
   for (let i = 0; i < argv.length; i += 2) {
@@ -168,8 +184,8 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
       minSamples: args["min-samples"] === undefined ? undefined : Number(args["min-samples"]),
     });
     report.kind = args.kind ?? "synthetic-fixture";
-    writeFileSync(args.output, JSON.stringify(report, null, 2) + "\n", { mode: 0o600 });
-    if (args.markdown) writeFileSync(args.markdown, markdown(report), { mode: 0o600 });
+    writePrivateReport(args.output, JSON.stringify(report, null, 2) + "\n");
+    if (args.markdown) writePrivateReport(args.markdown, markdown(report));
     process.stdout.write(`Compared ${report.comparisons.length} groups; ${report.regressions.length} informational regressions; output ${args.output}\n`);
   } catch (error) {
     process.stderr.write(`latency-regression: ${error.message}\n`);

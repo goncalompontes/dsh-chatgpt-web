@@ -1,6 +1,8 @@
 import { describe, expect, test } from "bun:test";
-import { readFileSync } from "node:fs";
-import { resolve } from "node:path";
+import { chmodSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
+import { spawnSync } from "node:child_process";
 // @ts-expect-error The standalone Node ESM CLI intentionally has no TS declarations.
 import { analyze, compare, summarize } from "../scripts/latency-regression.mjs";
 
@@ -38,6 +40,50 @@ describe("offline latency regression analyzer", () => {
     const result = compare([1, 1], [5, 5], { relativeThreshold: 0.2, absoluteThresholdSeconds: 0.5, minSamples: 3 });
     expect(result.status).toBe("insufficient-samples");
     expect(result.regression).toBeNull();
+  });
+
+  test("compares unrounded medians against absolute and relative thresholds", () => {
+    const options = { relativeThreshold: 0.2, absoluteThresholdSeconds: 0.5, minSamples: 3 };
+    const flagged = compare([1, 1, 1], [1.5004, 1.5004, 1.5004], options);
+    expect(flagged.deltaSeconds).toBe(0.5);
+    expect(flagged.regression).toBe(true);
+    const exactBoundary = compare([1, 1, 1], [1.5, 1.5, 1.5], options);
+    expect(exactBoundary.regression).toBe(false);
+    const belowRelative = compare([10, 10, 10], [10.5004, 10.5004, 10.5004], options);
+    expect(belowRelative.regression).toBe(false);
+    const fractionalBaseline = compare([1.0004, 1.0004, 1.0004], [1.5004, 1.5004, 1.5004], options);
+    expect(fractionalBaseline.regression).toBe(false);
+  });
+
+  test("creates and overwrites JSON and Markdown reports with 0600 permissions", () => {
+    if (process.platform === "win32") return;
+    const dir = mkdtempSync(join(tmpdir(), "dsh-latency-permissions-"));
+    try {
+      const jsonPath = join(dir, "report.json");
+      const markdownPath = join(dir, "report.md");
+      const invoke = () => spawnSync(process.execPath, [
+        resolve(import.meta.dir, "../scripts/latency-regression.mjs"),
+        "--baseline", resolve(import.meta.dir, "fixtures/latency-baseline.json"),
+        "--candidate", resolve(import.meta.dir, "fixtures/latency-candidate.json"),
+        "--output", jsonPath, "--markdown", markdownPath,
+      ], { encoding: "utf8" });
+      const check = () => {
+        expect(statSync(jsonPath).mode & 0o777).toBe(0o600);
+        expect(statSync(markdownPath).mode & 0o777).toBe(0o600);
+        expect(JSON.parse(readFileSync(jsonPath, "utf8")).comparisons).toHaveLength(2);
+        expect(readFileSync(markdownPath, "utf8")).toContain("Latency comparison");
+      };
+      expect(invoke().status).toBe(0);
+      check();
+      writeFileSync(jsonPath, "previous content");
+      writeFileSync(markdownPath, "previous content");
+      chmodSync(jsonPath, 0o666);
+      chmodSync(markdownPath, 0o644);
+      expect(invoke().status).toBe(0);
+      check();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   test("rejects malformed and sensitive data without echoing contents", () => {

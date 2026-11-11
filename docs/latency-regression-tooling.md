@@ -20,7 +20,7 @@ python3 scripts/measure-latency-matrix.py --runs 3 --output /tmp/private-empty-d
 node scripts/latency-regression.mjs --baseline /tmp/baseline/results.json --candidate /tmp/candidate/results.json --kind live-acp --output /tmp/comparison.json --markdown /tmp/comparison.md
 ```
 
-Run with stable browser capacity, model, prompt shapes, retained page state and external traffic. Alternate run order and take repeated samples. The comparator groups by stage, case, model, fresh/retained and concurrency width, not run/batch. All output dimensions are allowlisted and raw session IDs, paths, logs, trace IDs and credentials are omitted. Output files use mode 0600. Never commit raw diagnostic files, browser sessions or tokens.
+Run with stable browser capacity, model, prompt shapes, retained page state and external traffic. Alternate run order and take repeated samples. The comparator groups by stage, case, model, fresh/retained and concurrency width, not run/batch. All output dimensions are allowlisted and raw session IDs, paths, logs, trace IDs and credentials are omitted. Output files are set to mode 0600, including when overwriting existing files with permissive modes. Never commit raw diagnostic files, browser sessions or tokens.
 
 ## Measurement semantics
 
