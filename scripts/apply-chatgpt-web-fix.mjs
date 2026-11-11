@@ -9,13 +9,15 @@
  *   2. merge the branch onto current `fork/main` in a throwaway build worktree,
  *   3. prove the merged tree with `bun run typecheck` and `bun test`,
  *   4. push it to `main`,
- *   5. update the dedicated deployment worktree (a clean checkout the stack runs from) and rebuild
- *      its bundle,
+ *   5. build the merged tree and publish only the changed bundle files into the dedicated runtime
+ *      directory the stack launches (source lives in the build worktree, never in the runtime),
  *   6. let the sidecar's built-code watcher perform its own drain-then-restart. It waits for an
  *      idle gap (up to 15 minutes) and never rejects work because a build finished.
  *
  * Deployment never touches the developer checkout, so uncommitted work there is never overwritten,
  * and no active turn is interrupted by force: a busy sidecar simply reloads at its next idle gap.
+ * The runtime directory is not a git checkout, so publishing cannot resurrect an old committed
+ * bundle the way a hard reset would.
  *
  * Usage:
  *   node apply-chatgpt-web-fix.mjs --branch <ref> [--no-deploy] [--repo <path>]
@@ -130,44 +132,47 @@ function verify() {
 }
 
 /**
- * Move the deployment worktree to the merged commit and rebuild its bundle. This tree is what the
- * stack launches, so it is kept clean and never shares a checkout with developer edits.
+ * Build the merged tree and publish changed files into the runtime directory the stack launches.
+ *
+ * The runtime directory is a plain directory, not a checkout: resetting a worktree there would
+ * restore whatever stale bundle is committed in git, and every reset would also count as a change.
+ * Only changed files are copied, so an unchanged rebuild never wakes the built-code watcher.
  */
-function prepareDeployApp(head) {
-  ensureWorktree(CONFIG.appDir, head);
-  git(CONFIG.appDir, "fetch", CONFIG.remote, "--prune");
-  git(CONFIG.appDir, "checkout", "--detach", "--force", head);
-  git(CONFIG.appDir, "reset", "--hard", head);
-  git(CONFIG.appDir, "clean", "-fd", "-e", "node_modules");
-  if (!existsSync(join(CONFIG.appDir, "node_modules"))) {
-    log("installing dependencies in the deployment worktree");
+function prepareDeployApp() {
+  log("building the merged source");
+  run(CONFIG.buildDir, CONFIG.bun, ["run", "build"]);
+  mkdirSync(join(CONFIG.appDir, "lib"), { recursive: true });
+
+  let dependenciesChanged = false;
+  for (const file of ["package.json", "bun.lock"]) {
+    const source = join(CONFIG.buildDir, file);
+    const target = join(CONFIG.appDir, file);
+    if (!existsSync(source)) continue;
+    if (!existsSync(target) || !readFileSync(target).equals(readFileSync(source))) {
+      copyFileSync(source, target);
+      dependenciesChanged = true;
+    }
+  }
+  if (dependenciesChanged || !existsSync(join(CONFIG.appDir, "node_modules"))) {
+    log("installing runtime dependencies");
     run(CONFIG.appDir, CONFIG.bun, ["install", "--prefer-offline"]);
   }
-  log("building the deployment bundle");
-  // Build beside the live bundle first: copying into lib/ is what wakes the sidecar's built-code
-  // watcher, and an unchanged rebuild must not schedule a pointless idle restart.
-  const staged = join(CONFIG.appDir, "lib.staged");
-  rmSync(staged, { recursive: true, force: true });
-  run(CONFIG.appDir, CONFIG.bun, [
-    "build", "src/cli.ts", "src/plugin.ts",
-    "--outdir", "lib.staged", "--target", "node", "--format", "esm", "--packages", "external",
-  ]);
+
   const sameBytes = (left, right) => existsSync(left) && existsSync(right)
     && readFileSync(left).equals(readFileSync(right));
-  const files = ["cli.js", "plugin.js"];
-  const changed = files.filter(file => !sameBytes(join(CONFIG.appDir, "lib", file), join(staged, file)));
+  const changed = ["cli.js", "plugin.js"].filter(file => (
+    !sameBytes(join(CONFIG.appDir, "lib", file), join(CONFIG.buildDir, "lib", file))
+  ));
   if (changed.length > 0) {
     log(`publishing rebuilt bundle: ${changed.join(",")}`);
-    mkdirSync(join(CONFIG.appDir, "lib"), { recursive: true });
     for (const file of changed) {
       const temporary = join(CONFIG.appDir, "lib", `${file}.apply-${process.pid}`);
-      copyFileSync(join(staged, file), temporary);
+      copyFileSync(join(CONFIG.buildDir, "lib", file), temporary);
       renameSync(temporary, join(CONFIG.appDir, "lib", file));
     }
   } else {
     log("bundle unchanged; not touching the live files");
   }
-  rmSync(staged, { recursive: true, force: true });
   if (!existsSync(join(CONFIG.appDir, "lib", "cli.js"))) {
     throw new Error(`Build did not produce ${join(CONFIG.appDir, "lib", "cli.js")}`);
   }
@@ -271,7 +276,7 @@ async function main() {
   }
   const fingerprint = bundleFingerprint();
   try {
-    prepareDeployApp(mergedHead);
+    prepareDeployApp();
   } catch (error) {
     release();
     result({
