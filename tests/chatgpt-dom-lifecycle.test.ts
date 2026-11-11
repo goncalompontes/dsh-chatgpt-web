@@ -203,6 +203,19 @@ browserTest("assistant rebinding proves a late user node belongs to the submitte
     await render('<main><div data-content-search-unit-key="fallback-turn-0:0:user"><div data-user-message-bubble><span>local-shell-dsh</span><p>Execute task</p><p>with its exact context</p><button>Show more</button></div></div><div data-content-search-unit-key="fallback-turn-0:2:assistant">Final answer</div></main>');
     expect((await worker.reconcileAssistantTurnBinding(page, baseline, original)).identity).toBe("fallback-turn-0:2:assistant");
 
+    // A long reused Temporary Chat virtualizes its transcript. An older user turn can mount (or
+    // re-render under a new key) while our submitted prompt is still the newest user turn. That
+    // is history hydration, not a competing message, so the detached answer must rebind.
+    const history = {
+      identity: "fallback-turn-0:2:assistant",
+      locator: chatGptTurnLocator(page, "fallback-turn-0:2:assistant"),
+      acceptedUserTurnIdentities: ["fallback-turn-0:1:user"],
+    };
+    await render('<main><div data-content-search-unit-key="fallback-turn-0:0:user">Earlier task</div><div data-content-search-unit-key="fallback-turn-0:1:user"><div data-user-message-bubble>Execute task\nwith its exact context</div></div><div data-content-search-unit-key="fallback-turn-0:3:assistant">Final answer</div></main>');
+    const hydrated = await worker.reconcileAssistantTurnBinding(page, baseline, history);
+    expect(hydrated.identity).toBe("fallback-turn-0:3:assistant");
+    expect(hydrated.acceptedUserTurnIdentities).toEqual(["fallback-turn-0:0:user", "fallback-turn-0:1:user"]);
+
     // A genuinely different message must not be accepted as late hydration.
     await render('<main><div data-content-search-unit-key="fallback-turn-0:0:user">Different task</div><div data-content-search-unit-key="fallback-turn-0:2:assistant">Wrong answer</div></main>');
     await expect(worker.reconcileAssistantTurnBinding(page, baseline, original)).rejects.toThrow("another user turn");
