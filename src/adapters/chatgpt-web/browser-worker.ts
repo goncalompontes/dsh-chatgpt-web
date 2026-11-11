@@ -1858,6 +1858,40 @@ export function chatGptConversationIdentity(url: string): string | undefined {
   }
 }
 
+/**
+ * A conversation-identity change during a turn means one of two different things:
+ *
+ * - the submitted turn survived and only its transcript node tree was remounted, or
+ * - ChatGPT discarded the Temporary Chat and is now showing a fresh conversation that contains
+ *   neither the submitted user turn nor its assistant turn.
+ *
+ * Only the first case is a remount that can be observed in place. Binding to the second case keeps
+ * waiting for a response that the navigation already destroyed, and then misreports it as a
+ * response DOM that was never created. A retained transcript must still carry at least the user
+ * turn (or the assistant turn, if it already rendered) beyond the pre-submission baseline.
+ */
+export function chatGptRemountRetainsTurn(
+  state: { userTurnCount: number; assistantTurnCount: number },
+  baseline: { initialUserTurnCount: number; initialResponseTurnCount: number },
+): boolean {
+  return state.userTurnCount > baseline.initialUserTurnCount
+    || state.assistantTurnCount > baseline.initialResponseTurnCount;
+}
+
+/**
+ * What a conversation remount can do once the missing-response grace has elapsed on a settled
+ * (non-rehydrating) page: bind to the assistant turn the rebuilt transcript retained, or replay
+ * the prompt because the navigation discarded the in-flight turn. An elapsed grace with no new
+ * assistant turn is not "still loading" — a live generator would have kept its Stop button and a
+ * longer observation budget.
+ */
+export function chatGptRemountDecision(
+  state: { userTurnCount: number; assistantTurnCount: number },
+  baseline: { initialUserTurnCount: number; initialResponseTurnCount: number },
+): "bind" | "replay" {
+  return state.assistantTurnCount > baseline.initialResponseTurnCount ? "bind" : "replay";
+}
+
 export function chatGptReboundTurnIdentity(
   initial: readonly string[],
   boundIdentity: string,
@@ -5637,7 +5671,7 @@ export class ChatGptBrowserWorker {
       let submissionBaseline = await this.captureSubmissionBaseline(page);
       let catalogRefreshAvailable = mode.localTools && !reuseConversation && !prepared.multipart;
       const connectorAttemptBudget: ChatGptConnectorAttemptBudget = { triggerAttempts: 0 };
-      const completionTracker = new ChatGptCompletionTracker();
+      let completionTracker = new ChatGptCompletionTracker();
       const sendAndWaitForResponse = async (attempt: number): Promise<ChatGptAssistantTurnBinding> => {
         const stagePrefix = attempt === 1 ? "" : `surface-recovery_${attempt}_`;
         // The text prompt is re-attached on every attempt: a stale-surface recovery reloads a
@@ -5782,55 +5816,20 @@ export class ChatGptBrowserWorker {
       // Free-plan Temporary Chat rehydrates the conversation SPA unpredictably ("Loading chats" /
       // "Loading profile"), discarding the in-flight generation. A rehydration that outlives the
       // stall budget fails the wait with ChatGptSurfaceStaleError; the recovery reloads a fresh
-      // Temporary Chat document and resubmits the same prompt. Retained-conversation turns cannot
-      // be replayed onto a fresh document, so they surface the error instead.
+      // Temporary Chat document and resubmits the same prompt. The same loss can happen after the
+      // first assistant node was already bound (the turn then observes the conversation identity
+      // change), so the recovery encompasses the whole bound-response observation, not only the
+      // pre-binding wait. Retained-conversation turns cannot be replayed onto a fresh document, so
+      // they surface the error instead.
       const surfaceStaleRecoveryAttempts = 2;
       let responseTurn: ChatGptAssistantTurnBinding;
+      let finalText = "";
       for (let surfaceStaleAttempt = 1; ; surfaceStaleAttempt++) {
         try {
+          completionTracker = new ChatGptCompletionTracker();
           responseTurn = await sendAndWaitForResponse(surfaceStaleAttempt);
-          break;
-        } catch (error) {
-          if (!(error instanceof ChatGptSurfaceStaleError)
-            || surfaceStaleAttempt >= surfaceStaleRecoveryAttempts
-            || reuseConversation) {
-            throw error;
-          }
-          console.warn(
-            `[chatgpt-web] browser turn ${turn.traceId} recovered from a stale temporary-chat surface`
-            + ` (attempt ${surfaceStaleAttempt}/${surfaceStaleRecoveryAttempts}): ${redactChatGptUiDiagnostic(error.message)}`,
-          );
-          await diagnostics.capture(page, `surface-stale-recovery_${surfaceStaleAttempt}`);
-          await this.runStage(
-            turn.traceId,
-            `surface_stale_recovery_${surfaceStaleAttempt}`,
-            browserStageTimeouts.temporaryChatPreparation,
-            async () => {
-              await page.reload({ waitUntil: "domcontentloaded", timeout: 60_000 });
-              await this.prepareTemporaryChatSurface(
-                page,
-                checkpoint => diagnostics.capture(page, checkpoint),
-              );
-              mode = await this.selectModelAndEffort(
-                page,
-                turn.modelId,
-                turn.reasoning,
-                turn.capabilities,
-                checkpoint => diagnostics.capture(page, checkpoint),
-              );
-              // Let the freshly reloaded composer finish hydrating before re-attaching, so the
-              // send button can enable once the prompt lands. Re-sending into a mid-rehydration
-              // composer leaves the button disabled and fails the recovery attempt.
-              await this.waitForRehydrationSettled(page, 15_000);
-              submissionBaseline = await this.captureSubmissionBaseline(page);
-            },
-          );
-          await diagnostics.capture(page, `surface-stale-recovery-ready_${surfaceStaleAttempt}`);
-        }
-      }
 
       let lastHeartbeat = 0;
-      let finalText = "";
       let emittedTextChars = 0;
       let sawRunning = false;
       let loggedCompletionWait = false;
@@ -5854,7 +5853,7 @@ export class ChatGptBrowserWorker {
         console.warn(`[chatgpt-web] consistency warning handled gracefully: ${error.message}`);
         return { markdown: "", delta: "" };
       };
-      let domHealthTracker = new ChatGptTurnDomHealthTracker();
+      const domHealthTracker = new ChatGptTurnDomHealthTracker();
       const stoppedThinkingTracker = new ChatGptStoppedThinkingTracker();
       const responseDomCache: ChatGptResponseDomCache = {};
       let toolConfirmationGraceUntil = 0;
@@ -5862,6 +5861,7 @@ export class ChatGptBrowserWorker {
       let internalObservationFaults = 0;
       let observedThisIteration = false;
       let completionFenceRevision: number | undefined;
+      let rehydrationSince: number | undefined;
       for (;;) {
         // The heartbeat is a consumer callback, so it stays outside the observation-fault region:
         // a defect in the caller must not be retried as though the page could not be read.
@@ -5899,6 +5899,30 @@ export class ChatGptBrowserWorker {
           await new Promise(resolveSleep => setTimeout(resolveSleep, 250));
           continue;
         }
+
+        // A rehydrating conversation cannot expose the assistant turn: ChatGPT is rebuilding the
+        // transcript. Charging that stretch to the missing-response grace is what turns an ordinary
+        // Temporary Chat remount into "did not create a response DOM". The pre-binding wait already
+        // pauses its deadline for this overlay; the bound-response loop must apply the same rule,
+        // and an overlay that outlives the stall budget is a stale surface, not a slow answer.
+        if (await this.pageIsRehydrating(page)) {
+          rehydrationSince ??= Date.now();
+          if (Date.now() - rehydrationSince > CHATGPT_PAGE_REHYDRATION_STALL_MS) {
+            // A stale surface can only be replayed while the turn has not emitted an answer and has
+            // not issued tool calls. Once either happened, reloading would duplicate work.
+            if (emittedTextChars === 0
+              && (turn.externalProgress?.snapshot()?.lastToolBatchRevision ?? 0) === 0) {
+              throw new ChatGptSurfaceStaleError(
+                "ChatGPT is still rehydrating the conversation page (Loading chats); the temporary-chat surface may be stale — retry the turn",
+              );
+            }
+            throw new Error("ChatGPT kept rehydrating the conversation after the turn started producing work");
+          }
+          domHealthTracker.clearMissingResponse();
+          await new Promise(resolveSleep => setTimeout(resolveSleep, 250));
+          continue;
+        }
+        rehydrationSince = undefined;
 
         let snapshot = await this.responseDomSnapshot(responseTurn.locator, responseDomCache);
         if (!snapshot.responsePresent) {
@@ -6115,14 +6139,44 @@ export class ChatGptBrowserWorker {
             // remount the transcript. No text was delivered yet, so bind to the newest assistant
             // turn in the new conversation and keep observing instead of failing the turn.
             const state = await this.submissionDomState(page, {}, turn.abortSignal);
-            const latestAssistant = state.responseIdentities.at(-1);
+            const retainsTurn = chatGptRemountRetainsTurn(state, submissionBaseline);
+            const remountDecision = chatGptRemountDecision(state, submissionBaseline);
+            const latestAssistant = remountDecision === "bind"
+              ? state.responseIdentities.at(-1)
+              : undefined;
             console.warn(
-              `[chatgpt-web] browser turn ${turn.traceId} recovered a conversation remount`
+              `[chatgpt-web] browser turn ${turn.traceId} observed a conversation remount`
               + ` (${conversationIdentity ?? "unknown"} -> ${currentConversation},`
-              + ` assistantTurns=${state.assistantTurnCount})`,
+              + ` userTurns=${state.userTurnCount}, assistantTurns=${state.assistantTurnCount},`
+              + ` running=${state.visibleStopButtonCount > 0}, retainsTurn=${retainsTurn},`
+              + ` decision=${remountDecision})`,
             );
+            if (!latestAssistant) {
+              // The remount finished without an assistant turn to bind. Nothing was emitted yet, and
+              // the missing-response grace has already elapsed on a settled, non-rehydrating page,
+              // so ChatGPT is not generating into this transcript: the navigation discarded the
+              // in-flight turn. Waiting can only end in a bogus "no response DOM" verdict because
+              // the answer belongs to a conversation that no longer exists. This is the documented
+              // Temporary Chat rehydration loss, so use its bounded replay recovery.
+              // A turn that already issued tool calls must not be replayed: the broker has executed
+              // them, and a fresh submission would run them a second time. Fail it as a detached
+              // response instead.
+              if ((externalProgressSnapshot?.lastToolBatchRevision ?? 0) > 0) {
+                throw new Error(
+                  "ChatGPT remounted the Temporary Chat and detached a response whose tool calls had already run",
+                );
+              }
+              throw new ChatGptSurfaceStaleError(
+                retainsTurn
+                  ? "ChatGPT remounted the Temporary Chat before it rendered the submitted turn's answer; the in-flight generation was discarded"
+                  : "ChatGPT remounted the Temporary Chat into a conversation that no longer contains the submitted turn",
+              );
+            }
             conversationIdentity = currentConversation;
-            domHealthTracker = new ChatGptTurnDomHealthTracker();
+            // The remount replaced the response nodes, not the turn. Keep the evidence that a
+            // response existed so a later disappearance is reported as a disappearance, and give
+            // the rebuilt transcript a fresh observation window instead of charging the old one.
+            domHealthTracker.clearMissingResponse();
             responseDomCache.key = undefined;
             responseDomCache.snapshot = undefined;
             submissionBaseline = {
@@ -6187,6 +6241,44 @@ export class ChatGptBrowserWorker {
       );
       completed = true;
       return finalText;
+        } catch (error) {
+          if (!(error instanceof ChatGptSurfaceStaleError)
+            || surfaceStaleAttempt >= surfaceStaleRecoveryAttempts
+            || reuseConversation) {
+            throw error;
+          }
+          console.warn(
+            `[chatgpt-web] browser turn ${turn.traceId} recovered from a stale temporary-chat surface`
+            + ` (attempt ${surfaceStaleAttempt}/${surfaceStaleRecoveryAttempts}): ${redactChatGptUiDiagnostic(error.message)}`,
+          );
+          await diagnostics.capture(page, `surface-stale-recovery_${surfaceStaleAttempt}`);
+          await this.runStage(
+            turn.traceId,
+            `surface_stale_recovery_${surfaceStaleAttempt}`,
+            browserStageTimeouts.temporaryChatPreparation,
+            async () => {
+              await page.reload({ waitUntil: "domcontentloaded", timeout: 60_000 });
+              await this.prepareTemporaryChatSurface(
+                page,
+                checkpoint => diagnostics.capture(page, checkpoint),
+              );
+              mode = await this.selectModelAndEffort(
+                page,
+                turn.modelId,
+                turn.reasoning,
+                turn.capabilities,
+                checkpoint => diagnostics.capture(page, checkpoint),
+              );
+              // Let the freshly reloaded composer finish hydrating before re-attaching, so the
+              // send button can enable once the prompt lands. Re-sending into a mid-rehydration
+              // composer leaves the button disabled and fails the recovery attempt.
+              await this.waitForRehydrationSettled(page, 15_000);
+              submissionBaseline = await this.captureSubmissionBaseline(page);
+            },
+          );
+          await diagnostics.capture(page, `surface-stale-recovery-ready_${surfaceStaleAttempt}`);
+        }
+      }
     } catch (error) {
       console.error(
         `[chatgpt-web] browser turn ${turn.traceId} failed:`
