@@ -52,22 +52,29 @@ export const CHATGPT_WEB_MEDIUM_HIGH_AUTO_COMPACT_TOKEN_LIMIT = 80_000;
 export const CHATGPT_WEB_INSTANT_COMPOSER_CHAR_LIMIT = 211_256;
 export const CHATGPT_WEB_MEDIUM_HIGH_COMPOSER_CHAR_LIMIT = 1_048_572;
 /**
- * Measured Plus single-message acceptance boundary for the Sol/GPT-6 Medium and High routes.
+ * Measured Plus browser *submission* budget: everything the browser sends for one turn, including
+ * the fixed ChatGPT platform prompt, must stay below this estimated total. It is an account-level
+ * transport constraint, not a model context window, so every Plus effort shares it.
  *
- * The composer accepting text and ChatGPT accepting one message are different surfaces. The larger
- * "composer" constants above describe how much text the editor will hold; they do not prove that
- * ChatGPT will answer it. In the live 2026-11-11 sidecar run (Plus account, effort High) the last
- * accepted temporary-chat submission carried 36,867 visible message tokens (45,059 estimated input
- * tokens with the 8,192-token platform reserve, 115,320 submitted characters). The first rejected
- * one carried 43,155 visible message tokens (51,347 estimated, 145,551 characters): ChatGPT
- * remounted the temporary chat and rendered "The message you submitted was too long, please edit
- * it and resubmit." The sentinel then reported two more rejected replays from the same deployment
- * (traces a9848e58328a at 57,456 estimated input tokens / 194,182 characters and 1f1d407c48b7 at
- * 62,227 / 199,224), while the longest completed submission was trace 886ce48d4f2c at 126,763
- * characters. Every observation is consistent with a visible-token boundary in (36,867, 43,155].
- * 40,000 keeps every observed accepted payload and rejects every observed rejected one before it
- * reaches the composer. The 90,000-token value is the route's model context window, not the size
- * of one browser message.
+ * 2026-11-11 live sidecar evidence (Plus, GPT-6, temporary chats) shows that a *single-message*
+ * boundary cannot be derived from the fleet: ChatGPT answered 38,420 estimated input tokens
+ * (trace 918ba6437cf1) and even 44,450 (trace 2c4c99edbab7), while rejecting 37,647
+ * (trace 0c02745e9838) and 41,998 (trace 978a32706515) during the same run. A payload smaller than
+ * one ChatGPT accepted was rejected, so message size alone does not decide acceptance; the upstream
+ * ceiling moves with the account's route/quota state. What is stable is that every observed
+ * "The message you submitted was too long" rejection on this deployment sits above the 32,000-token
+ * submission threshold the Instant route already uses to leave room for ChatGPT's own prompt:
+ * 37,647, 38,954, 41,366, 41,998, 45,130, 45,496 and 47,364 estimated input tokens. Submissions at
+ * or below 32,000 were never rejected. The bridge therefore sizes every Plus browser submission to
+ * that measured safe budget instead of a per-effort message ceiling.
+ */
+export const CHATGPT_WEB_PLUS_BROWSER_SUBMISSION_TOKEN_LIMIT =
+  CHATGPT_WEB_INSTANT_AUTO_COMPACT_TOKEN_LIMIT;
+/**
+ * Per-message boundary for Bigger Context staging on the Plus Sol/GPT-6 routes. A staged part is
+ * not a full submission: staging deliberately reuses one conversation, so this stays a per-message
+ * ceiling. Inline turns are gated by the submission budget above, which is the binding constraint
+ * (a 40,000-token message plus the platform prompt is already outside it).
  */
 export const CHATGPT_WEB_PLUS_MEDIUM_HIGH_MESSAGE_TOKEN_LIMIT = 40_000;
 /** Hidden ChatGPT product prompt and Codex Native schema reserve included in usage estimates. */
@@ -133,6 +140,8 @@ export interface ChatGptWebContextLimits {
 
 export interface ChatGptWebTransportLimits {
   browserMessageTokenLimit?: number;
+  /** Total compiled browser input (message plus the estimated hidden platform prompt). */
+  browserSubmissionTokenLimit?: number;
   browserComposerCharLimit?: number;
 }
 
@@ -227,10 +236,14 @@ export function resolveChatGptWebTransportLimits(
   }
   if (!capabilities.proAvailable) {
     if (effort === "low") {
-      return { browserComposerCharLimit: CHATGPT_WEB_INSTANT_COMPOSER_CHAR_LIMIT };
+      return {
+        browserSubmissionTokenLimit: CHATGPT_WEB_PLUS_BROWSER_SUBMISSION_TOKEN_LIMIT,
+        browserComposerCharLimit: CHATGPT_WEB_INSTANT_COMPOSER_CHAR_LIMIT,
+      };
     }
     if (effort === "medium" || effort === "high") {
       return {
+        browserSubmissionTokenLimit: CHATGPT_WEB_PLUS_BROWSER_SUBMISSION_TOKEN_LIMIT,
         browserMessageTokenLimit: CHATGPT_WEB_PLUS_MEDIUM_HIGH_MESSAGE_TOKEN_LIMIT,
         browserComposerCharLimit: CHATGPT_WEB_MEDIUM_HIGH_COMPOSER_CHAR_LIMIT,
       };
