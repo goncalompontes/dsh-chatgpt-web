@@ -11,12 +11,11 @@
  *   4. push it to `main`,
  *   5. update the dedicated deployment worktree (a clean checkout the stack runs from) and rebuild
  *      its bundle,
- *   6. restart the sidecar through the stack supervisor only when it has no active or queued turn,
- *      then wait for health.
+ *   6. let the sidecar's built-code watcher perform its own drain-then-restart. It waits for an
+ *      idle gap (up to 15 minutes) and never rejects work because a build finished.
  *
- * There is no code hot reload in the sidecar (only config hot reload), so "reload" means an idle
- * restart. A busy host defers the restart instead of breaking work. Deployment never touches the
- * developer checkout, so uncommitted work there is never overwritten.
+ * Deployment never touches the developer checkout, so uncommitted work there is never overwritten,
+ * and no active turn is interrupted by force: a busy sidecar simply reloads at its next idle gap.
  *
  * Usage:
  *   node apply-chatgpt-web-fix.mjs --branch <ref> [--no-deploy] [--repo <path>]
@@ -27,6 +26,7 @@
  */
 
 import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import {
   closeSync, existsSync, mkdirSync, openSync, readFileSync, rmSync, statSync, writeFileSync,
 } from "node:fs";
@@ -149,6 +149,17 @@ function prepareDeployApp(head) {
   }
 }
 
+/** Content identity of the deployment bundle, so an unchanged rebuild needs no reload. */
+function bundleFingerprint() {
+  return ["cli.js", "plugin.js"]
+    .map(file => {
+      const path = join(CONFIG.appDir, "lib", file);
+      if (!existsSync(path)) return `${file}:missing`;
+      return `${file}:${createHash("sha256").update(readFileSync(path)).digest("hex")}`;
+    })
+    .join("|");
+}
+
 async function health() {
   try {
     const response = await fetch(CONFIG.healthUrl, { signal: AbortSignal.timeout(3_000) });
@@ -178,24 +189,19 @@ async function waitForIdle(timeoutMs) {
   }
 }
 
-async function deploy(status) {
-  log(`restarting sidecar pid=${status.pid}`);
-  const before = status.pid;
-  process.kill(before, "SIGTERM");
-  const downDeadline = Date.now() + 20_000;
-  while (Date.now() < downDeadline) {
-    if (!(await health())) break;
-    await new Promise(resolve => setTimeout(resolve, 500));
+/**
+ * Wait for the built-code watcher to replace the running sidecar. The watcher only restarts at an
+ * idle gap, so this returns quickly when idle and otherwise reports the armed reload instead of
+ * interrupting work.
+ */
+async function waitForWatcherReload(previousPid, timeoutMs) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const status = await health();
+    if (status && status.pid !== previousPid) return status;
+    await new Promise(resolve => setTimeout(resolve, 2_000));
   }
-  log("asking the stack supervisor to start the sidecar");
-  run(CONFIG.repo, CONFIG.stack, ["ensure", "--client-pid", String(process.pid)], 120_000);
-  const upDeadline = Date.now() + 60_000;
-  while (Date.now() < upDeadline) {
-    const next = await health();
-    if (next && next.pid !== before) return next;
-    await new Promise(resolve => setTimeout(resolve, 1_000));
-  }
-  throw new Error(`sidecar did not become healthy again after restart (previous pid ${before})`);
+  return undefined;
 }
 
 async function main() {
@@ -231,6 +237,15 @@ async function main() {
     result({ ...summary, deployed: false, built: false, reason: "--no-deploy" });
   }
 
+  const before = await health();
+  if (!before) {
+    release();
+    result({
+      ...summary, deployed: false, built: false,
+      reason: "sidecar is not running; nothing to reload, the next start uses the merged main",
+    });
+  }
+  const fingerprint = bundleFingerprint();
   try {
     prepareDeployApp(mergedHead);
   } catch (error) {
@@ -241,30 +256,25 @@ async function main() {
       reason: "merged into main, but the deployment worktree could not be updated; the running sidecar is untouched",
     }, 1);
   }
-
-  const status = await waitForIdle(CONFIG.idleTimeoutSeconds * 1_000);
-  if (!status) {
+  if (bundleFingerprint() === fingerprint) {
     release();
     result({
-      ...summary, deployed: false, built: true,
-      reason: `sidecar stayed busy for ${CONFIG.idleTimeoutSeconds}s; merged, pushed and built into the deployment worktree, restart deferred`,
+      ...summary, deployed: true, built: true, reloaded: false,
+      reason: "bundle unchanged; the running sidecar already matches main",
     });
   }
-  try {
-    const next = await deploy(status);
-    release();
+  const next = await waitForWatcherReload(before.pid, CONFIG.idleTimeoutSeconds * 1_000);
+  release();
+  if (next) {
     result({
-      ...summary, deployed: true, built: true,
-      sidecar: { previousPid: status.pid, pid: next.pid, healthz: CONFIG.healthUrl, appDir: CONFIG.appDir },
+      ...summary, deployed: true, built: true, reloaded: true,
+      sidecar: { previousPid: before.pid, pid: next.pid, healthz: CONFIG.healthUrl, appDir: CONFIG.appDir },
     });
-  } catch (error) {
-    release();
-    result({
-      ...summary, deployed: false, built: true,
-      error: error instanceof Error ? error.message : String(error),
-      reason: "merged into main and built into the deployment worktree, but the restart failed; inspect the sidecar log",
-    }, 1);
   }
+  result({
+    ...summary, deployed: false, built: true, reloaded: false,
+    reason: `bundle rebuilt; the sidecar hot-restarts at its next idle gap (watcher armed, waited ${CONFIG.idleTimeoutSeconds}s)`,
+  });
 }
 
 main().catch(error => {

@@ -182,8 +182,11 @@ function recentSignature(state, sig, now) {
 }
 
 function retryAllowed(entry, now) {
-  return entry.attempts < 1
-    || (entry.attempts === 1 && now - Date.parse(entry.lastAttemptAt ?? 0) >= CONFIG.retryMinutes * 60_000);
+  // A dispatched signature owns a thread; retrying it would open a duplicate for one error.
+  if (entry.threadId) return false;
+  if (!entry.attempts) return true;
+  return entry.attempts === 1
+    && now - Date.parse(entry.lastAttemptAt ?? 0) >= CONFIG.retryMinutes * 60_000;
 }
 
 function dispatchAllowed(state, now) {
@@ -346,6 +349,15 @@ function selfTest() {
   if (!a || !b || a.sig !== b.sig) {
     failures += 1;
     console.error("self-test failed: trace ids and durations must not change a signature");
+  }
+  const now = Date.now();
+  if (retryAllowed({ sig: "x", threadId: "mcp:done", attempts: 0 }, now)) {
+    failures += 1;
+    console.error("self-test failed: a dispatched signature must not be retried");
+  }
+  if (!retryAllowed({ sig: "y", attempts: 1, lastAttemptAt: new Date(now - 3_600_000).toISOString() }, now)) {
+    failures += 1;
+    console.error("self-test failed: a failed dispatch must be retried after the delay");
   }
   const stageLine = classifyLine("[chatgpt-web] browser turn abc123 stage=send failed durationMs=20251: ChatGPT rejected the submitted messages as too long.");
   const turnLine = classifyLine("[chatgpt-web] browser turn abc123 failed: ChatGPT rejected the submitted messages as too long.");
