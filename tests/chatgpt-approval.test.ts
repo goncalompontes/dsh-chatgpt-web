@@ -82,6 +82,66 @@ browserTest("approval never clicks another connector's Allow once action", async
   }
 }, 15_000);
 
+browserTest("approval expands a disclosure covered by the fixed composer", async () => {
+  const browser = await chromium.launch({ executablePath, headless: true });
+  try {
+    const page = await browser.newPage({ viewport: { width: 1280, height: 720 } });
+    await page.setContent(`
+      <style>
+        html, body { margin: 0; height: 100%; }
+        #scroller { position: absolute; inset: 0; overflow-y: auto; }
+        #spacer { height: 620px; }
+        #approval { margin: 0 220px; padding: 10px; border: 1px solid #ccc; }
+        #details { display: block; margin-left: auto; }
+        #composer { position: fixed; left: 200px; right: 200px; bottom: 0; height: 140px; background: white; z-index: 100; }
+        #effort { position: absolute; left: 0; right: 0; top: 0; height: 120px; }
+      </style>
+      <div id="scroller">
+        <div id="spacer"></div>
+        <div role="alert" id="approval">
+          <div>ChatGPT Web Tools</div>
+          <div>Allow ChatGPT to use local-shell-dsh?</div>
+          <div>Run the shell tool with the command echo FIRST_STEP.
+            <button id="details" aria-expanded="false">See details</button>
+          </div>
+        </div>
+        <div style="height: 900px"></div>
+      </div>
+      <div id="composer"><button id="effort">Thinking effort 5.6 Instant</button></div>
+      <script>
+        // The approval card starts under the fixed composer: its disclosure control's centre
+        // belongs to the composer's model/effort button, not to "See details".
+        document.querySelector('#effort').addEventListener('click', () => {
+          document.querySelector('#effort').textContent = 'Thinking effort menu opened';
+        });
+        document.querySelector('#details').addEventListener('click', () => {
+          document.querySelector('#details').setAttribute('aria-expanded', 'true');
+          const allow = document.createElement('button');
+          allow.id = 'allow-once';
+          allow.textContent = 'Allow once';
+          allow.onclick = () => document.querySelector('#approval').remove();
+          document.querySelector('#approval').append(allow);
+        });
+      </script>
+    `);
+
+    const result = await resolveChatGptToolConfirmation(
+      page,
+      "local-shell-dsh",
+      true,
+      undefined,
+      4_000,
+    );
+    expect(result).toBe(true);
+    expect(await page.locator("#approval").count()).toBe(0);
+    expect(await page.locator("#details").count()).toBe(0);
+    // The covered composer control must not receive the approval click.
+    expect(await page.locator("#effort").innerText()).toBe("Thinking effort 5.6 Instant");
+  } finally {
+    await browser.close();
+  }
+}, 15_000);
+
 browserTest("approval failure is bounded and reports a recoverable UI state", async () => {
   const browser = await chromium.launch({ executablePath, headless: true });
   try {

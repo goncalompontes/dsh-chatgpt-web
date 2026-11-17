@@ -143,7 +143,12 @@ test("tool results prefer exact pipe-containing ids and accept pi-ai suffixes", 
 test("approval before an assistant DOM node is handled even at the DOM grace boundary", async () => {
   let approved = false;
   const hidden: any = { filter() { return this; }, last() { return this; }, isVisible: async () => false };
-  const allow: any = { last() { return this; }, isVisible: async () => true, press: async () => { approved = true; } };
+  const allow: any = {
+    last() { return this; },
+    isVisible: async () => true,
+    evaluate: async () => ({ x: 120, y: 200 }),
+    press: async () => { approved = true; },
+  };
   const dialog: any = {
     filter() { return this; }, last() { return this; }, isVisible: async () => !approved,
     getByRole: () => allow,
@@ -153,6 +158,7 @@ test("approval before an assistant DOM node is handled even at the DOM grace bou
     locator: () => ({ filter: ({ hasText }: any) => typeof hasText === "string" && hasText.startsWith("Allow ChatGPT") ? dialog : hidden }),
     getByRole: () => hidden,
     getByText: () => hidden,
+    mouse: { click: async () => { approved = true; } },
   };
   const worker: any = Object.create(ChatGptBrowserWorker.prototype);
   worker.config = { appName: "local-shell-dsh", autoApproveToolCalls: true };
