@@ -1060,19 +1060,68 @@ async function chatGptApprovalReadBefore<T>(
   }
 }
 
+interface ChatGptApprovalPoint {
+  x: number;
+  y: number;
+}
+
+/**
+ * ChatGPT renders the tool-approval card in the conversation flow. When the card is anchored at
+ * the bottom of a long transcript, its disclosure control sits under the fixed composer — the
+ * model/effort control occupies the control's geometric centre — so a forced centre click
+ * activates that composer control and the approval never expands. An approval action may only be
+ * dispatched at a point the page's own hit testing assigns to the action itself. Resolve such a
+ * point, centring the card in its scrollport when its current position is covered.
+ */
+async function chatGptApprovalActionPoint(
+  locator: Locator,
+  deadline: number,
+): Promise<ChatGptApprovalPoint | undefined> {
+  if (Date.now() >= deadline) return undefined;
+  try {
+    return await chatGptApprovalReadBefore(() => locator.evaluate(element => {
+      const fractions: Array<[number, number]> = [
+        [0.5, 0.5], [0.5, 0.7], [0.5, 0.3], [0.5, 0.85], [0.5, 0.15],
+        [0.25, 0.5], [0.75, 0.5], [0.1, 0.5], [0.9, 0.5],
+      ];
+      const candidate = (): ChatGptApprovalPoint | undefined => {
+        const rect = element.getBoundingClientRect();
+        if (rect.width <= 0 || rect.height <= 0) return undefined;
+        for (const [xFraction, yFraction] of fractions) {
+          const x = rect.left + rect.width * xFraction;
+          const y = rect.top + rect.height * yFraction;
+          if (x < 0 || y < 0 || x >= window.innerWidth || y >= window.innerHeight) continue;
+          const top = document.elementFromPoint(x, y);
+          // A descendant is the control's own label/icon. An ancestor or sibling is not this
+          // action, even though clicking it may visually land on the same row.
+          if (top && (top === element || element.contains(top))) return { x, y };
+        }
+        return undefined;
+      };
+      const visible = candidate();
+      if (visible) return visible;
+      element.scrollIntoView({ block: "center", inline: "nearest", behavior: "instant" });
+      return candidate();
+    }), deadline);
+  } catch {
+    return undefined;
+  }
+}
+
 async function chatGptApprovalActionClick(
+  page: Page,
   locator: Locator,
   signal: AbortSignal | undefined,
   deadline = Number.POSITIVE_INFINITY,
 ): Promise<boolean> {
   if (signal?.aborted) throw new DOMException("ChatGPT web turn aborted", "AbortError");
-  if (!await chatGptApprovalReadBefore(() => chatGptLocatorVisible(locator), deadline)) return false;
+  const point = await chatGptApprovalActionPoint(locator, deadline);
+  if (!point) return false;
   if (Date.now() >= deadline) return false;
-  const remainingTimeout = () => Math.max(1, Math.min(1_500, deadline - Date.now()));
   try {
-    // Playwright's click already scrolls into view. A separate scroll may consume the
-    // entire approval deadline before the action begins, particularly under contention.
-    await locator.click({ force: true, noWaitAfter: true, timeout: remainingTimeout() });
+    // Dispatch at the hit-tested point instead of the control's centre. `force` clicks bypass
+    // ChatGPT's fixed composer overlay, which is exactly what hides the approval control here.
+    await page.mouse.click(point.x, point.y);
     return true;
   } catch {
     // Older controls may only respond to Enter. Never start a fallback after the deadline:
@@ -1080,7 +1129,7 @@ async function chatGptApprovalActionClick(
     if (signal?.aborted) throw new DOMException("ChatGPT web turn aborted", "AbortError");
     if (Date.now() >= deadline) return false;
     try {
-      await locator.press("Enter", { timeout: remainingTimeout() });
+      await locator.press("Enter", { timeout: Math.max(1, Math.min(1_500, deadline - Date.now())) });
       return true;
     } catch {
       if (signal?.aborted) throw new DOMException("ChatGPT web turn aborted", "AbortError");
@@ -1194,7 +1243,7 @@ export async function resolveChatGptToolConfirmation(
       }
 
       const allow = await chatGptApprovalAllowOnce(page, dialog, deadline);
-      if (allow && await chatGptApprovalActionClick(allow, signal, deadline)) {
+      if (allow && await chatGptApprovalActionClick(page, allow, signal, deadline)) {
         if (await chatGptApprovalCardGone(dialog, 2_000, signal)) return true;
         // The click may have landed on a stale React node. Re-resolve and try the replacement.
         continue;
@@ -1202,7 +1251,7 @@ export async function resolveChatGptToolConfirmation(
 
       if (Date.now() >= deadline) break;
       const details = await chatGptApprovalDetails(dialog);
-      if (!detailsOpened && await chatGptApprovalActionClick(details, signal, deadline)) {
+      if (!detailsOpened && await chatGptApprovalActionClick(page, details, signal, deadline)) {
         detailsOpened = true;
         await new Promise(resolveSleep => setTimeout(resolveSleep, CHATGPT_TOOL_CONFIRMATION_POLL_MS));
         continue;
@@ -1237,7 +1286,7 @@ export async function resolveChatGptToolConfirmation(
 
   if (!await chatGptLocatorVisible(dialog)) return true;
   const deny = dialog.getByRole("button", { name: /^Deny\b/i }).last();
-  if (!await chatGptApprovalActionClick(deny, signal)) {
+  if (!await chatGptApprovalActionClick(page, deny, signal)) {
     throw new Error(`ChatGPT tool approval remained visible after ${timeoutMs}ms without a Deny action`);
   }
   await chatGptApprovalCardGone(dialog, 2_000, signal);
