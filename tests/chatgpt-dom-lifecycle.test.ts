@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
 import { existsSync } from "node:fs";
 import { chromium } from "playwright-core";
-import { ChatGptBrowserWorker, chatGptTurnLocator, throwIfChatGptSubmissionErrorAlert } from "../src/adapters/chatgpt-web/browser-worker";
+import { ChatGptBrowserWorker, ChatGptTurnDomHealthTracker, CHATGPT_RESPONSE_DOM_GRACE_MS, chatGptTurnLocator, throwIfChatGptPageErrorAlert } from "../src/adapters/chatgpt-web/browser-worker";
 import { activateChatGptEffortMenu } from "../src/chatgpt-session";
 
 const executablePath = process.env.CHROME_EXECUTABLE_PATH ?? "/usr/bin/google-chrome-stable";
@@ -83,29 +83,81 @@ browserTest("iframe-only answers and roadmap prose survive the browser-to-Markdo
   }
 });
 
-browserTest("submission alerts outside a detached assistant preserve overflow and upstream failure reasons", async () => {
+browserTest("page-level terminal alerts outside a detached assistant preserve their real cause", async () => {
   const browser = await chromium.launch({ executablePath, headless: true });
   try {
     const page = await browser.newPage();
     await page.setContent('<main><div data-message-author-role="user">Submitted context</div><aside role="alert">The messages you submitted were too long, please edit them and resubmit.<button>Retry</button></aside></main>');
-    await expect(throwIfChatGptSubmissionErrorAlert(page)).rejects.toMatchObject({
+    await expect(throwIfChatGptPageErrorAlert(page)).rejects.toMatchObject({
       code: "context_length_exceeded", status: 400, errorType: "invalid_request_error", retryable: false,
     });
     await page.setContent('<main><aside role="alert">The message you submitted was too long, please edit and resubmit.</aside></main>');
-    await expect(throwIfChatGptSubmissionErrorAlert(page)).rejects.toMatchObject({
+    await expect(throwIfChatGptPageErrorAlert(page)).rejects.toMatchObject({
       code: "context_length_exceeded", status: 400, errorType: "invalid_request_error", retryable: false,
     });
     await page.setContent('<main><aside role="alert">Something went wrong. Please try again<button>Retry</button></aside></main>');
-    await expect(throwIfChatGptSubmissionErrorAlert(page)).rejects.toMatchObject({
+    await expect(throwIfChatGptPageErrorAlert(page)).rejects.toMatchObject({
       code: "upstream_server_error", status: 502, retryable: false,
     });
     // Quoted history, hidden alerts, and unrelated notifications are not submission failures.
     await page.setContent('<aside role="alert">The messages you submitted were too long, please edit them and resubmit.</aside><aside role="alert">The message you submitted was too long, please edit and resubmit.</aside><main><p>Something went wrong. Please try againRetry</p><aside role="alert" hidden>The messages you submitted were too long, please edit them and resubmit.</aside><aside role="alert" hidden>The message you submitted was too long, please edit and resubmit.</aside><aside role="alert">Allow ChatGPT to use local-shell-dsh?</aside></main>');
-    await throwIfChatGptSubmissionErrorAlert(page);
+    await throwIfChatGptPageErrorAlert(page);
   } finally {
     await browser.close();
   }
 });
+
+browserTest("a stream ChatGPT abandoned is the turn's cause, not a disappeared response DOM", async () => {
+  const browser = await chromium.launch({ executablePath, headless: true });
+  try {
+    const page = await browser.newPage();
+    // Trace 8816046438ee at failure: ChatGPT retired the in-progress assistant turn and left the
+    // previous answer plus one alert. The bound locator resolves to nothing, and the alert is the
+    // only statement about why the turn ended.
+    await page.setContent(`<main>
+      <div data-message-author-role="assistant"><div class="markdown"><p>Previous answer</p></div></div>
+      <div data-chatgpt-search-unit-key="de47df26-8c4c-4a12-b40d-4aae8790ccd1:2:assistant"><div class="markdown"><p>Abandoned partial answer</p></div></div>
+      <div role="alert">Error in message stream<button>Retry</button></div>
+    </main>`);
+    const bound = chatGptTurnLocator(page, "709d947e-2bc3-52aa-ae06-92722505f893:2:assistant");
+    expect(await bound.count()).toBe(0);
+    // Charging that absence to the missing-response grace is what produced the wrong verdict: it
+    // cannot tell a turn ChatGPT ended from a renderer that lost a live response.
+    const health = new ChatGptTurnDomHealthTracker();
+    expect(health.update({
+      responsePresent: true, running: true, currentText: "Working", completionActionVisible: false,
+    }, 0)).toBeUndefined();
+    expect(health.update({
+      responsePresent: false, running: false, currentText: "", completionActionVisible: false,
+    }, 1)).toBeUndefined();
+    expect(health.update({
+      responsePresent: false, running: false, currentText: "", completionActionVisible: false,
+    }, 1 + CHATGPT_RESPONSE_DOM_GRACE_MS)).toContain("response DOM disappeared");
+    // The terminal surface must win: it names the upstream failure the DOM verdict hides, and the
+    // browser conversation still holds the prompt and every recorded tool result, so the retry is
+    // the one ChatGPT itself offers.
+    await expect(throwIfChatGptPageErrorAlert(page)).rejects.toMatchObject({
+      code: "upstream_server_error", status: 502, errorType: "server_error", retryable: true,
+    });
+
+    // Nothing about the answer text is terminal by itself: a transcript that quotes the banner, a
+    // hidden alert, and ChatGPT's tool approval card must all stay non-terminal.
+    await page.setContent(`<main>
+      <div data-message-author-role="assistant"><div class="markdown"><p>Logged: Error in message stream Retry</p></div></div>
+      <aside role="alert" hidden>Error in message stream<button>Retry</button></aside>
+      <div role="alert">ChatGPT Web ToolsAllow ChatGPT to use local-shell-dsh?The call attempts to apply a repository patch.<button>Allow once</button></div>
+    </main>`);
+    await throwIfChatGptPageErrorAlert(page);
+    // ChatGPT can drop the partial answer and render the banner alone before any turn is bound, so
+    // the pre-binding wait must reach the same conclusion.
+    await page.setContent('<main><div role="alert">Error in message stream<button>Retry</button></div></main>');
+    await expect(throwIfChatGptPageErrorAlert(page)).rejects.toMatchObject({
+      code: "upstream_server_error", retryable: true,
+    });
+  } finally {
+    await browser.close();
+  }
+}, 20_000);
 
 browserTest("completion action outside the answer root invalidates the DOM cache", async () => {
   const browser = await chromium.launch({ executablePath, headless: true });
