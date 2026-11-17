@@ -278,6 +278,12 @@ export function chatGptHtmlToMarkdown(html: string): string {
 
 export interface ChatGptMarkdownSegment {
   key: string;
+  /**
+   * Stable identity of the assistant message that rendered this block. A tool-using ChatGPT turn
+   * is rendered as several assistant messages whose per-message block keys and source offsets
+   * restart, so block identity must include the message.
+   */
+  scope?: string;
   tag?: string;
   html: string;
   text: string;
@@ -294,6 +300,7 @@ interface ChatGptMarkdownCandidate extends ChatGptMarkdownSegment {
 
 interface CommittedChatGptMarkdownSegment {
   key: string;
+  scope?: string;
   tag?: string;
   text: string;
   sourceStart?: number;
@@ -388,14 +395,30 @@ export class ChatGptMarkdownBuffer {
   }
 
   finish(): { markdown: string; delta: string } {
+    const delta = this.flushMessage();
+    return { markdown: this.markdown, delta };
+  }
+
+  /**
+   * Commit the pending blocks of a finished assistant message and keep the answer stream open.
+   *
+   * ChatGPT renders a tool-using turn as one assistant message per model step. When the next
+   * message appears below the bound one the previous message is finished: its trailing blocks are
+   * no longer "still streaming", they precede everything the new message will render, and they
+   * must enter the answer before it. Without this boundary they stay pending until `finish()`,
+   * which would place them after the next message.
+   */
+  flushMessage(): string {
     let delta = "";
     for (const segment of this.latest) {
       delta += this.commit(segment);
       this.committed.push(this.committedSegment(segment));
     }
-    this.candidates.clear();
     this.latest = [];
-    return { markdown: this.markdown, delta };
+    this.candidates.clear();
+    // A list group belongs to the message that opened it; the next message starts a new block.
+    this.lastGroup = undefined;
+    return delta;
   }
 
   currentSnapshotIsConsistent(): boolean {
@@ -408,7 +431,11 @@ export class ChatGptMarkdownBuffer {
     if (this.committed.length === 0 || segments.length === 0) return segments;
 
     const pending: ChatGptMarkdownSegment[] = [];
+    // One observation belongs to one assistant message. Committed blocks of a different message
+    // must not be treated as this message's prefix: their keys and source offsets restart.
+    const observationScope = segments[0]?.scope ?? "";
     const lastCommittedEnd = this.committed
+      .filter(committed => (committed.scope ?? "") === observationScope)
       .map(segment => segment.sourceEnd)
       .filter((end): end is number => end !== undefined)
       .at(-1);
@@ -455,7 +482,10 @@ export class ChatGptMarkdownBuffer {
   }
 
   private committedIndex(segment: ChatGptMarkdownSegment): number | undefined {
-    const exact = this.committed.findIndex(committed => (
+    const sameMessage = (committed: CommittedChatGptMarkdownSegment): boolean => (
+      (committed.scope ?? "") === (segment.scope ?? "")
+    );
+    const exact = this.committed.findIndex(committed => sameMessage(committed) && (
       segment.sourceStart !== undefined && committed.sourceStart !== undefined
         ? segment.sourceStart === committed.sourceStart && segment.tag === committed.tag
         : segment.key === committed.key
@@ -466,33 +496,41 @@ export class ChatGptMarkdownBuffer {
     if (!segment.tag) return undefined;
     const semanticMatches = this.committed
       .map((committed, index) => ({ committed, index }))
-      .filter(({ committed }) => committed.tag === segment.tag && committed.text === segment.text);
+      .filter(({ committed }) => sameMessage(committed) && committed.tag === segment.tag && committed.text === segment.text);
     return semanticMatches.length === 1 ? semanticMatches[0]!.index : undefined;
   }
 
   private matchesLatestPending(segment: ChatGptMarkdownSegment): boolean {
     const exact = this.latest.filter(candidate => (
-      segment.sourceStart !== undefined && candidate.sourceStart !== undefined
-        ? segment.sourceStart === candidate.sourceStart && segment.tag === candidate.tag
-        : segment.key === candidate.key
+      (candidate.scope ?? "") !== (segment.scope ?? "")
+        ? false
+        : segment.sourceStart !== undefined && candidate.sourceStart !== undefined
+          ? segment.sourceStart === candidate.sourceStart && segment.tag === candidate.tag
+          : segment.key === candidate.key
     ));
     if (exact.length === 1) return true;
     if (segment.sourceStart !== undefined) return false;
     if (!segment.tag) return false;
     return this.latest.filter(candidate => (
-      candidate.tag === segment.tag && candidate.text === segment.text
+      (candidate.scope ?? "") === (segment.scope ?? "")
+        && candidate.tag === segment.tag
+        && candidate.text === segment.text
     )).length === 1;
   }
 
   private candidateId(segment: ChatGptMarkdownSegment): string {
+    // Block keys and source offsets are message-local; the scope keeps a later assistant message's
+    // blocks from aliasing an already committed block of the message before it.
+    const scope = segment.scope ?? "";
     return segment.sourceStart !== undefined
-      ? `source:${segment.sourceStart}:${segment.tag ?? ""}`
-      : `key:${segment.key}`;
+      ? `${scope}\u0000source:${segment.sourceStart}:${segment.tag ?? ""}`
+      : `${scope}\u0000key:${segment.key}`;
   }
 
   private committedSegment(segment: ChatGptMarkdownSegment): CommittedChatGptMarkdownSegment {
     return {
       key: segment.key,
+      ...(segment.scope !== undefined ? { scope: segment.scope } : {}),
       ...(segment.tag ? { tag: segment.tag } : {}),
       text: segment.text,
       ...(segment.sourceStart !== undefined ? { sourceStart: segment.sourceStart } : {}),
