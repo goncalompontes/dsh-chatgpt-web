@@ -2049,6 +2049,30 @@ export function chatGptAppendedUserTurn(
 }
 
 /**
+ * ChatGPT renders a tool-using turn as one assistant turn per model message. The message that
+ * issues the tool calls stays complete (with its own copy action) while the model writes its next
+ * message below it, so "the turn's answer" follows the newest assistant turn, not the first one
+ * bound after submission.
+ *
+ * Only a turn appended below the bound one can continue this submission: identities that predate
+ * the submission are transcript history, and a Temporary Chat remount can mount older assistant
+ * turns, which keep their place before the bound message instead of following it.
+ */
+export function chatGptContinuedAssistantTurn(
+  initialResponseTurnIdentities: readonly string[],
+  currentResponseTurnIdentities: readonly string[],
+  boundIdentity: string,
+): string | undefined {
+  const boundIndex = currentResponseTurnIdentities.indexOf(boundIdentity);
+  if (boundIndex < 0) return undefined;
+  const newest = currentResponseTurnIdentities.at(-1);
+  if (newest === undefined || newest === boundIdentity) return undefined;
+  if (currentResponseTurnIdentities.indexOf(newest) <= boundIndex) return undefined;
+  if (initialResponseTurnIdentities.includes(newest)) return undefined;
+  return newest;
+}
+
+/**
  * Stable conversation identity from the current URL. Temporary Chat starts as a local
  * conversation (`/c/local-chatgpt:<uuid>`) and later migrates to a server conversation
  * (`/c/<uuid>`); a change while a turn is active means the transcript was remounted.
@@ -3890,6 +3914,38 @@ export class ChatGptBrowserWorker {
     }
   }
 
+  /**
+   * Follow the assistant message ChatGPT appends below the bound one for the next model step.
+   *
+   * A competing human message also grows the transcript, so an appended user turn suspends the
+   * advance: its answer would not belong to this submission. A transient DOM probe failure leaves
+   * the binding untouched and the next observation retries.
+   */
+  private async continuedAssistantTurn(
+    page: Page,
+    baseline: ChatGptSubmissionBaseline,
+    binding: ChatGptAssistantTurnBinding,
+    signal?: AbortSignal,
+  ): Promise<ChatGptAssistantTurnBinding | undefined> {
+    const state = await this.submissionDomState(page, baseline.domCache, signal)
+      .catch(() => undefined);
+    if (!state) return undefined;
+    if (chatGptAppendedUserTurn(binding.acceptedUserTurnIdentities, state.userIdentities)) {
+      return undefined;
+    }
+    const identity = chatGptContinuedAssistantTurn(
+      baseline.initialResponseTurnIdentities,
+      state.responseIdentities,
+      binding.identity,
+    );
+    if (!identity) return undefined;
+    return {
+      identity,
+      locator: chatGptTurnLocator(page, identity),
+      acceptedUserTurnIdentities: binding.acceptedUserTurnIdentities,
+    };
+  }
+
   private async reconcileAssistantTurnBinding(
     page: Page,
     baseline: ChatGptSubmissionBaseline,
@@ -5001,6 +5057,14 @@ export class ChatGptBrowserWorker {
   ): Promise<ChatGptResponseDomSnapshot> {
     const observed = await responseTurn.evaluate((element, options) => {
       const root = element as HTMLElement;
+      // A turn can be rendered as several assistant messages. Block identities inside one message
+      // restart from their first source offset, so the message itself is part of every block's
+      // identity; otherwise the next message's first paragraph would look like an already
+      // committed block and its text would be dropped from the answer stream.
+      const responseScope = root.getAttribute("data-chatgpt-search-unit-key")
+        ?? root.getAttribute("data-content-search-unit-key")
+        ?? root.getAttribute("data-testid")
+        ?? undefined;
       type ObserverRegistry = {
         documentId: string;
         nextId: number;
@@ -5243,6 +5307,7 @@ export class ChatGptBrowserWorker {
         key: segment.sourceStart !== undefined
           ? `${segment.sourceStart}:${segment.tag}`
           : `${index}:${segment.tag}`,
+        ...(responseScope !== undefined ? { scope: responseScope } : {}),
         tag: segment.tag,
         html: segment.html,
         text: segment.text,
@@ -6204,6 +6269,31 @@ export class ChatGptBrowserWorker {
           continue;
         }
         rehydrationSince = undefined;
+
+        // A tool-using ChatGPT turn is one assistant turn per model message: the message that
+        // issued the last tool calls stays complete (with its own copy action) while the model
+        // writes its answer below it as a new assistant turn. Completion and answer text therefore
+        // belong to the newest message. Keeping the first binding makes the turn look like it
+        // completed without an answer, and drops the text it actually rendered.
+        if (turn.externalProgress) {
+          const continued = await this.continuedAssistantTurn(
+            page,
+            submissionBaseline,
+            responseTurn,
+            turn.abortSignal,
+          );
+          if (continued) {
+            const flushed = markdownBuffer.flushMessage();
+            if (flushed) emitMarkdownDelta(flushed);
+            console.info(
+              `[chatgpt-web] browser turn ${turn.traceId} continued into a new assistant turn`
+              + ` (previous=${responseTurn.identity}, current=${continued.identity})`,
+            );
+            responseTurn = continued;
+            responseDomCache.key = undefined;
+            responseDomCache.snapshot = undefined;
+          }
+        }
 
         let snapshot = await this.responseDomSnapshot(responseTurn.locator, responseDomCache);
         if (!snapshot.responsePresent) {
