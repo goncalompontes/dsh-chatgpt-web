@@ -1007,8 +1007,31 @@ export async function throwIfChatGptTerminalErrorAlert(scope: ChatGptTextScope):
 export const CHATGPT_MESSAGE_TOO_LONG_ALERT =
   /The messages? you submitted (?:was|were) too long[\s\S]*resubmit/i;
 
-/** Submission failures can replace the assistant node with a sibling alert. */
-export async function throwIfChatGptSubmissionErrorAlert(page: Page): Promise<void> {
+/**
+ * ChatGPT's own terminal state for a response that had already started streaming. The renderer
+ * retires the abandoned assistant turn and leaves one alert that carries a Retry control
+ * ("Error in message stream"), so the missing assistant node is a *consequence* of the upstream
+ * termination and cannot be diagnosed as a DOM change. 2026-11-17 trace 8816046438ee: the alert was
+ * on screen from ~07:04:20, both terminal matchers ignored it, the bound turn stayed absent for the
+ * whole missing-response grace, and the turn was reported as "response DOM disappeared".
+ *
+ * The Retry control is part of the contract: approvals and notifications reuse the alert role
+ * without ever offering a retry, and a quoted copy of this sentence in transcript text is not an
+ * alert at all. ChatGPT renders the label and the control as one text run
+ * ("Error in message streamRetry" in the live capture), so the control is matched without a word
+ * boundary.
+ */
+export const CHATGPT_ABANDONED_STREAM_ALERT = /Error in message stream[\s\S]*Retry/i;
+
+/**
+ * Every page-level terminal alert that replaces the assistant node it belonged to.
+ *
+ * These surfaces are the only evidence left once ChatGPT has retired that node, so the caller must
+ * read them before inferring anything from DOM absence, and they must never be scoped to the bound
+ * turn: the bound turn is exactly what these alerts remove. ChatGPT's stream abandonment belongs
+ * here for the same reason as its submission rejections.
+ */
+export async function throwIfChatGptPageErrorAlert(page: Page): Promise<void> {
   const alerts = page.locator('main [role="alert"]');
   const overflow = alerts.filter({ hasText: CHATGPT_MESSAGE_TOO_LONG_ALERT }).last();
   if (await overflow.isVisible().catch(() => false)) {
@@ -1022,6 +1045,16 @@ export async function throwIfChatGptSubmissionErrorAlert(page: Page): Promise<vo
     throw new ChatGptWebAdapterError(
       "ChatGPT ended the submitted turn with 'Something went wrong. Please try again'.",
       { status: 502, errorType: "server_error", code: "upstream_server_error", retryable: false },
+    );
+  }
+  // A stream that ChatGPT itself abandoned is transient: the browser conversation still holds the
+  // submitted prompt and every recorded tool result, so retrying replays the answer instead of
+  // repeating work that already ran.
+  const abandoned = alerts.filter({ hasText: CHATGPT_ABANDONED_STREAM_ALERT }).last();
+  if (await abandoned.isVisible().catch(() => false)) {
+    throw new ChatGptWebAdapterError(
+      "ChatGPT ended the response with 'Error in message stream'. Retry the turn.",
+      { status: 502, errorType: "server_error", code: "upstream_server_error", retryable: true },
     );
   }
 }
@@ -3556,7 +3589,7 @@ export class ChatGptBrowserWorker {
       await throwIfChatGptSessionFailureAlert(page);
       await throwIfChatGptRateLimitDialog(page);
       await throwIfChatGptTerminalErrorAlert(baseline.responseTurns.last());
-      await throwIfChatGptSubmissionErrorAlert(page);
+      await throwIfChatGptPageErrorAlert(page);
       // A custom MCP connector can ask for approval before ChatGPT renders its assistant turn.
       // Treat the approved tool call as valid submission evidence, then let the normal
       // observation loop wait for the response.
@@ -3824,7 +3857,7 @@ export class ChatGptBrowserWorker {
       }
       await throwIfChatGptSessionFailureAlert(observationPage);
       await throwIfChatGptRateLimitDialog(observationPage);
-      await throwIfChatGptSubmissionErrorAlert(observationPage);
+      await throwIfChatGptPageErrorAlert(observationPage);
       let state: ChatGptSubmissionDomState;
       try {
         state = await this.submissionDomState(
@@ -4712,7 +4745,7 @@ export class ChatGptBrowserWorker {
     if (page.isClosed() || callerSignal?.aborted) return undefined;
     // A submission rejection the browser rendered is definitive (for example the composer
     // overflow alert); surface it rather than guessing from an empty or unchanged DOM.
-    await throwIfChatGptSubmissionErrorAlert(page);
+    await throwIfChatGptPageErrorAlert(page);
     let evidence: ChatGptSubmissionEvidence | undefined;
     try {
       evidence = await withChatGptBrowserObservationTimeout(
@@ -4772,7 +4805,7 @@ export class ChatGptBrowserWorker {
       }
       await throwIfChatGptSessionFailureAlert(page);
       await throwIfChatGptTerminalErrorAlert(responseTurn.locator);
-      await throwIfChatGptSubmissionErrorAlert(page);
+      await throwIfChatGptPageErrorAlert(page);
       let snapshot = await this.responseDomSnapshot(responseTurn.locator, responseDomCache);
       if (!snapshot.responsePresent && await responseTurn.locator.count() !== 1) {
         const rebound = await this.reconcileAssistantTurnBinding(
@@ -6230,7 +6263,7 @@ export class ChatGptBrowserWorker {
         }
         await throwIfChatGptSessionFailureAlert(page);
         await throwIfChatGptTerminalErrorAlert(responseTurn.locator);
-        await throwIfChatGptSubmissionErrorAlert(page);
+        await throwIfChatGptPageErrorAlert(page);
 
         if (mode.localTools && await resolveChatGptToolConfirmation(
           page,
