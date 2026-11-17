@@ -1138,6 +1138,21 @@ async function chatGptApprovalDetails(dialog: Locator): Promise<Locator> {
   return dialog.getByRole("button", { name: /See details/i }).last();
 }
 
+/**
+ * A turn's stable identity is either the legacy test id (`conversation-turn-<n>`) or a search
+ * unit key shaped `<conversation-scope>:<index>:<role>`. The scope token is opaque and changes
+ * between builds (observed: `fallback-turn-<n>` in the Nov 11 renderer, the conversation UUID
+ * in the Nov 17 renderer), so only the trailing index/role pair is part of the contract. That
+ * pair also proves the element is the turn type the selector matched.
+ */
+export function chatGptTurnIdentityPattern(role: "user" | "assistant"): string {
+  return `^(?:conversation-turn-.+|.+:\\d+:${role})$`;
+}
+
+export function chatGptTurnIdentityIsStable(identity: string | null, role: "user" | "assistant"): boolean {
+  return identity !== null && new RegExp(chatGptTurnIdentityPattern(role)).test(identity);
+}
+
 export function chatGptTurnLocator(page: Page, identity: string): Locator {
   const key = JSON.stringify(identity);
   const selectors = ["data-chatgpt-search-unit-key", "data-content-search-unit-key", "data-testid"]
@@ -3542,12 +3557,12 @@ export class ChatGptBrowserWorker {
       })();
       const observerKey = `${observerState.id}:${observerState.revision}`;
       if (options.knownKey === observerKey) return { key: observerKey };
-      const identities = (selector: string): string[] => {
+      const identities = (selector: string, identityPattern: string): string[] => {
         const byIdentity = new Map<string, Element[]>();
         for (const element of document.querySelectorAll(selector)) {
           const identity = element.getAttribute("data-chatgpt-search-unit-key")
             ?? element.getAttribute("data-content-search-unit-key") ?? element.getAttribute("data-testid");
-          if (!identity || (!identity.startsWith("conversation-turn-") && !identity.startsWith("fallback-turn-"))) {
+          if (identity === null || !new RegExp(identityPattern).test(identity)) {
             throw new Error("ChatGPT conversation turn has no stable identity");
           }
           const prior = byIdentity.get(identity) ?? [];
@@ -3569,8 +3584,8 @@ export class ChatGptBrowserWorker {
           && style.visibility !== "hidden"
           && (bounds.width > 0 || bounds.height > 0);
       };
-      const userIdentities = identities(options.userTurnSelector);
-      const responseIdentities = identities(options.assistantTurnSelector);
+      const userIdentities = identities(options.userTurnSelector, options.userIdentityPattern);
+      const responseIdentities = identities(options.assistantTurnSelector, options.assistantIdentityPattern);
       return {
         key: observerKey,
         snapshot: {
@@ -3584,6 +3599,8 @@ export class ChatGptBrowserWorker {
     }, {
       userTurnSelector: CHATGPT_USER_TURN_SELECTOR,
       assistantTurnSelector: CHATGPT_ASSISTANT_TURN_SELECTOR,
+      userIdentityPattern: chatGptTurnIdentityPattern("user"),
+      assistantIdentityPattern: chatGptTurnIdentityPattern("assistant"),
       stopButtonSelector: CHATGPT_STOP_BUTTON_SELECTOR,
       knownKey: cache?.key,
       attributeFilter: [...CHATGPT_DOM_REVISION_ATTRIBUTES],

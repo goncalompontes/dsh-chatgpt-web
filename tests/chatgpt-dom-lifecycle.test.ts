@@ -155,6 +155,18 @@ browserTest("completion action outside the answer root invalidates the DOM cache
     expect(await rebound.count()).toBe(1);
     await page.locator("main").evaluate(element => element.insertAdjacentHTML("beforeend", '<div data-content-search-unit-key="fallback-turn-0:1:assistant">Duplicate</div>'));
     await expect(worker.submissionDomState(page)).rejects.toThrow("duplicate conversation turn identities");
+
+    // The Nov 17 renderer scopes the unit key with the conversation UUID instead of
+    // `fallback-turn-<n>`. It is the same `<scope>:<index>:<role>` identity contract, so
+    // discovery and binding must accept it rather than require the retired literal prefix.
+    await page.setContent('<main><div data-content-search-unit-key="6afbd553-37ac-83ed-aa90-f4857a09aeb2:1:user"><div data-chatgpt-search-unit-key="6afbd553-37ac-83ed-aa90-f4857a09aeb2:1:user">Task</div></div><div data-content-search-unit-key="af452a82-e53d-5a9a-adc1-8f1bffa69c14:2:assistant"><div data-chatgpt-search-unit-key="af452a82-e53d-5a9a-adc1-8f1bffa69c14:2:assistant"><div class="markdown"><p>Answer</p></div></div></div></main>');
+    const conversationScoped = await worker.submissionDomState(page);
+    expect(conversationScoped.userIdentities).toEqual(["6afbd553-37ac-83ed-aa90-f4857a09aeb2:1:user"]);
+    expect(conversationScoped.responseIdentities).toEqual(["af452a82-e53d-5a9a-adc1-8f1bffa69c14:2:assistant"]);
+    expect(await chatGptTurnLocator(page, conversationScoped.responseIdentities[0]).count()).toBe(1);
+    // An alias naming the other role must still be rejected instead of binding the wrong turn.
+    await page.setContent('<main><div data-content-search-unit-key="af452a82-e53d-5a9a-adc1-8f1bffa69c14:2:assistant" data-chatgpt-search-unit-key="af452a82-e53d-5a9a-adc1-8f1bffa69c14:2:user">Mislabelled</div></main>');
+    await expect(worker.submissionDomState(page)).rejects.toThrow("no stable identity");
   } finally {
     await browser.close();
   }
